@@ -2,4 +2,4 @@
 
 tcg-vault.io
 
-Come & have fun
+Come & have fun!
