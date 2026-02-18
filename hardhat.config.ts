@@ -19,7 +19,8 @@ import '@openzeppelin/hardhat-upgrades';
 import networks from './hardhat.network';
 
 const defaultSettings: SolcUserConfig['settings'] = {
-  optimizer: { enabled: true }
+  optimizer: { enabled: true },
+  evmVersion: 'cancun', // EIP-1153 tstore/tload for liquidity exemption and buy router
 };
 
 type ContractMap = Record<string, { abi: object }>;
