@@ -1,12 +1,15 @@
+/* Based on https://github.com/tsconfig/bases/blob/501da2bcd640cf95c95805783e1012b992338f28/bases/node22.json */
 {
   "compilerOptions": {
-    "target": "esnext",
-    "module": "commonjs",
-    "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
+    "lib": ["es2023"],
+    "module": "node16",
+    "target": "es2022",
     "strict": true,
+    "esModuleInterop": true,
     "skipLibCheck": true,
-    "resolveJsonModule": true,
-    "paths": { "~/modules/*": ["./ignition/modules/*"] }
-  }
+    "moduleResolution": "node16",
+    "outDir": "dist"
+  },
+  "include": ["hardhat.config.ts", "scripts/**/*.ts", "test/**/*.ts", "artifacts/**/*.d.ts"],
+  "exclude": ["node_modules", "eslint.config.ts"]
 }

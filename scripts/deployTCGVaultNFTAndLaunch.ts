@@ -16,11 +16,12 @@
  *   TCGV_ADDRESS=... USDC_ADDRESS=... NEXUS_ADDRESS=... yarn hardhat run scripts/deployTCGVaultNFTAndLaunch.ts --network <network>
  */
 
-import * as hre from "hardhat";
+import hre from "hardhat";
 import { parseEther } from "viem";
 
 async function main() {
-  const [deployer] = await hre.viem.getWalletClients();
+  const { viem } = await hre.network.connect();
+  const [deployer] = await viem.getWalletClients();
   const tcgvAddress = (process.env.TCGV_ADDRESS || process.env.TOKEN_ADDRESS) as `0x${string}`;
   const usdcAddress = (process.env.USDC_ADDRESS || process.env.STABLECOIN_ADDRESS) as `0x${string}`;
   const nexusAddress = process.env.NEXUS_ADDRESS as `0x${string}`;
@@ -36,10 +37,10 @@ async function main() {
   console.log("NEXUS:", nexusAddress);
   console.log("Treasury:", treasury);
 
-  const vault = await hre.viem.deployContract("TCGVaultStakingVault", [tcgvAddress], { account: deployer.account });
+  const vault = await viem.deployContract("TCGVaultStakingVault", [tcgvAddress], { client: { wallet: deployer } });
   console.log("TCGVaultStakingVault:", vault.address);
 
-  const basicNFT = await hre.viem.deployContract("TCGVaultBasicNFT", [vault.address], { account: deployer.account });
+  const basicNFT = await viem.deployContract("TCGVaultBasicNFT", [vault.address], { client: { wallet: deployer } });
   console.log("TCGVaultBasicNFT:", basicNFT.address);
 
   const minShares = parseEther("5000");
@@ -47,19 +48,19 @@ async function main() {
   await vault.write.setBasicNFTContract([basicNFT.address], { account: deployer.account });
   console.log("Min stake for Basic NFT set (5000 TCGV)");
 
-  const founderNFT = await hre.viem.deployContract("TCGVaultFounderNFT", [usdcAddress, nexusAddress, treasury], { account: deployer.account });
+  const founderNFT = await viem.deployContract("TCGVaultFounderNFT", [usdcAddress, nexusAddress, treasury], { client: { wallet: deployer } });
   console.log("TCGVaultFounderNFT:", founderNFT.address);
 
-  const initialLaunch = await hre.viem.deployContract("TCGVaultInitialLaunch", [
+  const initialLaunch = await viem.deployContract("TCGVaultInitialLaunch", [
     tcgvAddress,
     usdcAddress,
     founderNFT.address,
     nexusAddress,
     treasury,
-  ], { account: deployer.account });
+  ], { client: { wallet: deployer } });
   console.log("TCGVaultInitialLaunch:", initialLaunch.address);
 
-  const nexus = await hre.viem.getContractAt("TCGNexusToken", nexusAddress);
+  const nexus = await viem.getContractAt("TCGNexusToken", nexusAddress);
   await nexus.write.setPresaleMinter([founderNFT.address, true], { account: deployer.account });
   await nexus.write.setPresaleMinter([initialLaunch.address, true], { account: deployer.account });
   console.log("NEXUS: set PresaleMinter for Founder NFT and Initial Launch");

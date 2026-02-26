@@ -7,8 +7,8 @@ import "./interfaces/ITCGVaultStakingVault.sol";
 
 /**
  * @title TCGVaultBasicNFT
- * @notice Édition basique — ticket d'entrée (whitepaper §7.2). Mint gratuit si 25$ en TCGV stakés.
- *   En cas d'unstake, le NFT est brûlé (via callback from staking vault).
+ * @notice Édition basique — ticket d'entrée (whitepaper §7.2). Soulbound, non-transferable.
+ *   Minted automatically when user has >= minStake (e.g. ~25$ TCGV) staked; burned when stake drops below (via staking vault).
  */
 contract TCGVaultBasicNFT is ERC721, Ownable {
     ITCGVaultStakingVault public stakingVault;
@@ -40,18 +40,20 @@ contract TCGVaultBasicNFT is ERC721, Ownable {
         return nextTokenId;
     }
 
-    /// @notice Minimum stake (shares) required to mint. Set to represent ~25 USD in TCGV at launch price.
+    /// @notice Minimum stake (shares) required to hold a Basic NFT. Set to represent ~25 USD in TCGV at launch price.
     function minStakeRequired() public view returns (uint256) {
         return stakingVault.minStakeForBasicNFT();
     }
 
-    /// @notice Mint one Basic NFT if caller has at least minStakeRequired() shares in the staking vault. Free (no USDC).
-    function mint() external {
-        if (stakingVault.balanceOf(msg.sender) < minStakeRequired()) revert InsufficientStake();
-        if (ownerToTokenId[msg.sender] != 0) revert AlreadyMinted(); // 1-based in mapping so 0 = not minted
+    /// @notice Called by staking vault when a user's stake reaches or exceeds minimum. Mints one Basic NFT for the account if eligible.
+    /// @dev Access: only stakingVault. Idempotent: no-op if account already has a Basic NFT or stake is below minimum.
+    function mintFor(address account) external {
+        if (msg.sender != address(stakingVault)) revert OnlyStakingVault();
+        if (stakingVault.balanceOf(account) < minStakeRequired()) return; // not enough stake, no-op
+        if (ownerToTokenId[account] != 0) return; // already has Basic NFT, no-op
         uint256 tokenId = nextTokenId++;
-        ownerToTokenId[msg.sender] = tokenId + 1; // store 1-based so tokenId 0 is stored as 1
-        _safeMint(msg.sender, tokenId);
+        ownerToTokenId[account] = tokenId + 1; // store 1-based so tokenId 0 is stored as 1
+        _safeMint(account, tokenId);
     }
 
     /// @notice Called by staking vault when user's stake drops below minimum. Burns all Basic NFTs held by owner.
@@ -68,6 +70,7 @@ contract TCGVaultBasicNFT is ERC721, Ownable {
         }
     }
 
+    /// @dev Soulbound: only mint (from==0) and burn (to==0) allowed; transfers revert.
     function _update(address to, uint256 tokenId, address auth)
         internal
         virtual
@@ -75,12 +78,12 @@ contract TCGVaultBasicNFT is ERC721, Ownable {
         returns (address)
     {
         address from = _ownerOf(tokenId);
+        if (from != address(0) && to != address(0)) revert Soulbound();
         if (from != address(0)) ownerToTokenId[from] = 0;
         if (to != address(0)) ownerToTokenId[to] = tokenId + 1; // 1-based so 0 = not minted
         return super._update(to, tokenId, auth);
     }
 
-    error InsufficientStake();
-    error AlreadyMinted();
     error OnlyStakingVault();
+    error Soulbound();
 }

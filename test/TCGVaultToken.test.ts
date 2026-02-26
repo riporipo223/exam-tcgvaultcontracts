@@ -1,13 +1,26 @@
+import { describe, it, before } from "node:test";
 import { expect } from "chai";
 import hre from "hardhat";
 import { parseEther, formatEther, zeroAddress, getAddress, getContractAddress, encodeFunctionData } from "viem";
-import { mine } from "@nomicfoundation/hardhat-network-helpers";
+import type { ContractReturnType } from "@nomicfoundation/hardhat-viem/types";
+
+const { viem } = await hre.network.connect();
+
+async function expectRevert(promise: Promise<unknown>) {
+  let reverted = false;
+  try {
+    await promise;
+  } catch {
+    reverted = true;
+  }
+  expect(reverted).to.equal(true);
+}
 
 const ZERO = zeroAddress;
 
 // Helper to ensure transactions complete in Hardhat
 async function waitForTx(hash: `0x${string}`) {
-  const publicClient = await hre.viem.getPublicClient();
+  const publicClient = await viem.getPublicClient();
   try {
     // In Hardhat, transactions are synchronous, but we wait to ensure state is updated
     await publicClient.waitForTransactionReceipt({ hash, timeout: 10000 });
@@ -20,22 +33,22 @@ async function waitForTx(hash: `0x${string}`) {
   }
 }
 
-describe("TCGVaultToken", function () {
-  let owner: Awaited<ReturnType<typeof hre.viem.getWalletClients>>[0];
-  let vault: Awaited<ReturnType<typeof hre.viem.getWalletClients>>[0];
-  let marketing: Awaited<ReturnType<typeof hre.viem.getWalletClients>>[0];
-  let community: Awaited<ReturnType<typeof hre.viem.getWalletClients>>[0];
-  let user1: Awaited<ReturnType<typeof hre.viem.getWalletClients>>[0];
-  let user2: Awaited<ReturnType<typeof hre.viem.getWalletClients>>[0];
+describe("TCGVaultToken", () => {
+  let owner: Awaited<ReturnType<typeof viem.getWalletClients>>[0];
+  let vault: Awaited<ReturnType<typeof viem.getWalletClients>>[0];
+  let marketing: Awaited<ReturnType<typeof viem.getWalletClients>>[0];
+  let community: Awaited<ReturnType<typeof viem.getWalletClients>>[0];
+  let user1: Awaited<ReturnType<typeof viem.getWalletClients>>[0];
+  let user2: Awaited<ReturnType<typeof viem.getWalletClients>>[0];
 
-  let weth: ReturnType<typeof hre.viem.getContractAt>;
-  let factory: ReturnType<typeof hre.viem.getContractAt>;
-  let router: ReturnType<typeof hre.viem.getContractAt>;
-  let tcgv: ReturnType<typeof hre.viem.getContractAt>;
-  let nexus: ReturnType<typeof hre.viem.getContractAt>;
-  let wrapper: ReturnType<typeof hre.viem.getContractAt>;
-  let pair: ReturnType<typeof hre.viem.getContractAt>;
-  let publicClient: Awaited<ReturnType<typeof hre.viem.getPublicClient>>;
+  let weth: ContractReturnType<"MockWETH">;
+  let factory: ContractReturnType<"MockUniswapV2Factory">;
+  let router: ContractReturnType<"MockUniswapV2Router">;
+  let tcgv: ContractReturnType<"TCGVaultToken">;
+  let nexus: ContractReturnType<"TCGNexusToken">;
+  let wrapper: ContractReturnType<"TCGVaultLiquidityWrapper">;
+  let pair: ContractReturnType<"MockUniswapV2Pair">;
+  let publicClient: Awaited<ReturnType<typeof viem.getPublicClient>>;
   let wethAddress: `0x${string}`;
   let factoryAddress: `0x${string}`;
   let routerAddress: `0x${string}`;
@@ -49,71 +62,74 @@ describe("TCGVaultToken", function () {
   const SELL_TAX_BP = 1000;
   const CASHBACK_BP = 1000;
 
-  before(async function () {
-    [owner, vault, marketing, community, user1, user2] = await hre.viem.getWalletClients();
-    publicClient = await hre.viem.getPublicClient();
+  before(async () => {
+    [owner, vault, marketing, community, user1, user2] = await viem.getWalletClients();
+    publicClient = await viem.getPublicClient();
 
     let nonce = await publicClient.getTransactionCount({ address: owner.account.address });
 
     // Deploy MockWETH
-    const wethHash = await hre.viem.deployContract("MockWETH", [], { account: owner.account });
+    await viem.deployContract("MockWETH", [], { client: { wallet: owner } });
     wethAddress = getContractAddress({ from: owner.account.address, nonce: BigInt(nonce++) });
-    // Don't wait for deployment transactions in Hardhat - they're synchronous
-    weth = await hre.viem.getContractAt("MockWETH", wethAddress);
+    weth = await viem.getContractAt("MockWETH", wethAddress);
 
     // Deploy MockFactory
-    const factoryHash = await hre.viem.deployContract("MockUniswapV2Factory", [], { account: owner.account });
+    await viem.deployContract("MockUniswapV2Factory", [], { client: { wallet: owner } });
     factoryAddress = getContractAddress({ from: owner.account.address, nonce: BigInt(nonce++) });
-    factory = await hre.viem.getContractAt("MockUniswapV2Factory", factoryAddress);
+    factory = await viem.getContractAt("MockUniswapV2Factory", factoryAddress);
 
     // Deploy MockRouter
-    const routerHash = await hre.viem.deployContract("MockUniswapV2Router", [factoryAddress, wethAddress], { account: owner.account });
+    await viem.deployContract("MockUniswapV2Router", [factoryAddress, wethAddress], { client: { wallet: owner } });
     routerAddress = getContractAddress({ from: owner.account.address, nonce: BigInt(nonce++) });
-    router = await hre.viem.getContractAt("MockUniswapV2Router", routerAddress);
+    router = await viem.getContractAt("MockUniswapV2Router", routerAddress);
 
     // Deploy TCGVaultToken
-    const tcgvHash = await hre.viem.deployContract("TCGVaultToken", [
+    await viem.deployContract("TCGVaultToken", [
       routerAddress,
       vault.account.address,
       marketing.account.address,
       community.account.address,
       ZERO,
       ZERO
-    ], { account: owner.account });
+    ], { client: { wallet: owner } });
     tcgvAddress = getContractAddress({ from: owner.account.address, nonce: BigInt(nonce++) });
-    tcgv = await hre.viem.getContractAt("TCGVaultToken", tcgvAddress);
+    tcgv = await viem.getContractAt("TCGVaultToken", tcgvAddress);
 
     // Deploy TCGNexusToken
-    const nexusHash = await hre.viem.deployContract("TCGNexusToken", [tcgvAddress], { account: owner.account });
+    await viem.deployContract("TCGNexusToken", [tcgvAddress], { client: { wallet: owner } });
     nexusAddress = getContractAddress({ from: owner.account.address, nonce: BigInt(nonce++) });
-    nexus = await hre.viem.getContractAt("TCGNexusToken", nexusAddress);
+    nexus = await viem.getContractAt("TCGNexusToken", nexusAddress);
 
     // Set addresses on TCGVaultToken
-    const setAddrHash = await tcgv.write.setAddresses([
-      vault.account.address,
-      marketing.account.address,
-      community.account.address,
+    const addrs: [`0x${string}`, `0x${string}`, `0x${string}`, `0x${string}`, `0x${string}`] = [
+      getAddress(vault.account.address),
+      getAddress(marketing.account.address),
+      getAddress(community.account.address),
       nexusAddress,
-      ZERO
-    ], { account: owner.account });
+      ZERO,
+    ];
+    const setAddrHash = await tcgv.write.setAddresses(addrs, { account: owner.account });
     await waitForTx(setAddrHash);
 
     // Create pair
-    const createPairHash = await factory.write.createPair([tcgvAddress, wethAddress], { account: owner.account });
+    const createPairHash = await factory.write.createPair([tcgvAddress as `0x${string}`, wethAddress], { account: owner.account });
     await waitForTx(createPairHash);
-    pairAddress = await factory.read.getPair([tcgvAddress, wethAddress]);
+    pairAddress = (await factory.read.getPair([tcgvAddress, wethAddress])) as `0x${string}`;
     
     // Set pair on token
     const setPairHash = await tcgv.write.setPair([pairAddress], { account: owner.account });
     await waitForTx(setPairHash);
-    pair = await hre.viem.getContractAt("MockUniswapV2Pair", pairAddress);
+    pair = await viem.getContractAt("MockUniswapV2Pair", pairAddress);
 
     // Deploy wrapper (deployContract waits for confirmation and returns the contract instance)
-    wrapper = await hre.viem.deployContract("TCGVaultLiquidityWrapper", [routerAddress], { account: owner.account });
-    wrapperAddress = wrapper.address;
+    wrapper = await viem.deployContract("TCGVaultLiquidityWrapper", [routerAddress], { client: { wallet: owner } });
+    wrapperAddress = wrapper.address as `0x${string}`;
     
     // Exclude wrapper from fees
-    const setExcludedHash = await tcgv.write.setExcludedFromFees([wrapperAddress, true], { account: owner.account });
+    const setExcludedHash = await tcgv.write.setExcludedFromFees(
+      [wrapperAddress, true],
+      { account: owner.account }
+    );
     await waitForTx(setExcludedHash);
     
     // Verify wrapper is excluded
@@ -129,11 +145,14 @@ describe("TCGVaultToken", function () {
     const deadline = block.timestamp + 300n;
     
     // Approve wrapper to spend tokens
-    const approveHash = await tcgv.write.approve([wrapperAddress, tokenAmount], { account: owner.account });
+    const approveHash = await tcgv.write.approve(
+      [wrapperAddress, tokenAmount],
+      { account: owner.account }
+    );
     await waitForTx(approveHash);
     
     // Verify approval
-    const allowance = await tcgv.read.allowance([owner.account.address, wrapperAddress]);
+    const allowance = (await tcgv.read.allowance([owner.account.address, wrapperAddress]));
     if (allowance < tokenAmount) {
       throw new Error(`Approval failed: expected ${tokenAmount}, got ${allowance}`);
     }
@@ -148,13 +167,10 @@ describe("TCGVaultToken", function () {
       deadline
     ], { value: ethAmount, account: owner.account });
     
-    // Mine a block to ensure transaction is included
-    await mine();
-    
     // Wait for transaction receipt and check status
     let receipt;
     try {
-      receipt = await publicClient.waitForTransactionReceipt({ hash: addLiqHash, timeout: 5000 });
+      receipt = await publicClient.waitForTransactionReceipt({ hash: addLiqHash as `0x${string}`, timeout: 5000 });
     } catch (error: any) {
       // If wait fails, transaction might have reverted - check balances
       const ownerBalanceAfter = await tcgv.read.balanceOf([owner.account.address]);
@@ -171,7 +187,7 @@ describe("TCGVaultToken", function () {
     }
     
     // Verify liquidity was added by checking pair reserves
-    const [r0, r1] = await pair.read.getReserves();
+    const [r0, r1] = (await pair.read.getReserves()) as [bigint, bigint, number];
     if (r0 === 0n && r1 === 0n) {
       const pairBalance = await tcgv.read.balanceOf([pairAddress]);
       const wrapperBalance = await tcgv.read.balanceOf([wrapperAddress]);
@@ -180,29 +196,30 @@ describe("TCGVaultToken", function () {
     }
   });
 
-  describe("Deployment", function () {
-    it("has correct name and symbol", async function () {
+  describe("Deployment", () => {
+    it("has correct name and symbol", async () => {
       expect(await tcgv.read.name()).to.equal("TCG-VAULT Token");
       expect(await tcgv.read.symbol()).to.equal("TCGV");
     });
-    it("minted 1B to owner", async function () {
+    it("minted 1B to owner", async () => {
       expect(await tcgv.read.totalSupply()).to.equal(TOTAL_SUPPLY);
       expect(await tcgv.read.balanceOf([owner.account.address])).to.equal(TOTAL_SUPPLY - parseEther("1000000"));
     });
-    it("pair has liquidity", async function () {
-      const [r0, r1] = await pair.read.getReserves();
-      expect(r0 + r1).to.be.gt(0);
+    it("pair has liquidity", async () => {
+      const reserves = (await pair.read.getReserves()) as [bigint, bigint, number];
+      const [r0, r1] = reserves;
+      expect(r0 + r1 > 0n).to.equal(true);
     });
   });
 
-  describe("Router path: buy (ETH -> TCGV)", function () {
-    it("charges 15% buy tax and gives 10% NEXUS cashback", async function () {
+  describe("Router path: buy (ETH -> TCGV)", () => {
+    it("charges 15% buy tax and gives 10% NEXUS cashback", async () => {
       const buyAmountEth = parseEther("1");
       const path = [wethAddress, tcgvAddress];
-      const vaultBefore = await tcgv.read.balanceOf([vault.account.address]);
-      const marketingBefore = await tcgv.read.balanceOf([marketing.account.address]);
-      const nexusBefore = await nexus.read.balanceOf([user1.account.address]);
-      const totalSupplyBefore = await tcgv.read.totalSupply();
+      const vaultBefore = (await tcgv.read.balanceOf([vault.account.address]));
+      const marketingBefore = (await tcgv.read.balanceOf([marketing.account.address]));
+      const nexusBefore = (await nexus.read.balanceOf([user1.account.address]));
+      const totalSupplyBefore = (await tcgv.read.totalSupply());
 
       await router.write.swapExactETHForTokens([
         0n,
@@ -211,54 +228,54 @@ describe("TCGVaultToken", function () {
         (await publicClient.getBlock()).timestamp + 300n
       ], { value: buyAmountEth, account: user1.account });
 
-      const userReceived = await tcgv.read.balanceOf([user1.account.address]);
-      const vaultAfter = await tcgv.read.balanceOf([vault.account.address]);
-      const marketingAfter = await tcgv.read.balanceOf([marketing.account.address]);
-      const nexusAfter = await nexus.read.balanceOf([user1.account.address]);
-      const totalSupplyAfter = await tcgv.read.totalSupply();
+      const userReceived = (await tcgv.read.balanceOf([user1.account.address]));
+      const vaultAfter = (await tcgv.read.balanceOf([vault.account.address]));
+      const marketingAfter = (await tcgv.read.balanceOf([marketing.account.address]));
+      const nexusAfter = (await nexus.read.balanceOf([user1.account.address]));
+      const totalSupplyAfter = (await tcgv.read.totalSupply());
 
-      expect(userReceived).to.be.gt(0);
-      expect(vaultAfter - vaultBefore).to.be.gte(0);
-      expect(marketingAfter - marketingBefore).to.be.gte(0);
-      expect(totalSupplyBefore - totalSupplyAfter).to.be.gt(0);
-      expect(nexusAfter - nexusBefore).to.be.gt(0);
+      expect(userReceived > 0n).to.equal(true);
+      expect(vaultAfter - vaultBefore >= 0n).to.equal(true);
+      expect(marketingAfter - marketingBefore >= 0n).to.equal(true);
+      expect(totalSupplyBefore - totalSupplyAfter > 0n).to.equal(true);
+      expect(nexusAfter - nexusBefore > 0n).to.equal(true);
     });
   });
 
-  describe("Non-router path: direct pair swap (buy)", function () {
-    it("charges buy tax when swapping via pair directly", async function () {
+  describe("Non-router path: direct pair swap (buy)", () => {
+    it("charges buy tax when swapping via pair directly", async () => {
       const ethIn = parseEther("0.5");
       await weth.write.deposit({ value: ethIn, account: user2.account });
       await weth.write.transfer([pairAddress, ethIn], { account: user2.account });
 
-      const token0 = await pair.read.token0();
+      const token0 = (await pair.read.token0()) as `0x${string}`;
       const isToken0Weth = token0.toLowerCase() === wethAddress.toLowerCase();
       const amountTcgvOut = parseEther("1000");
       const amount0Out = isToken0Weth ? 0n : amountTcgvOut;
       const amount1Out = isToken0Weth ? amountTcgvOut : 0n;
 
-      const user2Before = await tcgv.read.balanceOf([user2.account.address]);
-      const totalSupplyBefore = await tcgv.read.totalSupply();
+      const user2Before = (await tcgv.read.balanceOf([user2.account.address]));
+      const totalSupplyBefore = (await tcgv.read.totalSupply());
 
       await pair.write.swap([amount0Out, amount1Out, user2.account.address, "0x"], { account: user2.account });
 
-      const user2After = await tcgv.read.balanceOf([user2.account.address]);
-      const totalSupplyAfter = await tcgv.read.totalSupply();
+      const user2After = (await tcgv.read.balanceOf([user2.account.address]));
+      const totalSupplyAfter = (await tcgv.read.totalSupply());
 
-      expect(user2After).to.be.gte(user2Before);
-      expect(totalSupplyBefore).to.be.gt(totalSupplyAfter);
+      expect(user2After >= user2Before).to.equal(true);
+      expect(totalSupplyBefore > totalSupplyAfter).to.equal(true);
     });
   });
 
-  describe("Router path: sell (TCGV -> ETH)", function () {
-    it("charges 10% sell tax and no cashback", async function () {
+  describe("Router path: sell (TCGV -> ETH)", () => {
+    it("charges 10% sell tax and no cashback", async () => {
       const sellAmount = parseEther("5000");
       const path = [tcgvAddress, wethAddress];
-      const vaultBefore = await tcgv.read.balanceOf([vault.account.address]);
-      const marketingBefore = await tcgv.read.balanceOf([marketing.account.address]);
-      const communityBefore = await tcgv.read.balanceOf([community.account.address]);
-      const totalSupplyBefore = await tcgv.read.totalSupply();
-      const nexusBefore = await nexus.read.balanceOf([user1.account.address]);
+      const vaultBefore = (await tcgv.read.balanceOf([vault.account.address]));
+      const marketingBefore = (await tcgv.read.balanceOf([marketing.account.address]));
+      const communityBefore = (await tcgv.read.balanceOf([community.account.address]));
+      const totalSupplyBefore = (await tcgv.read.totalSupply());
+      const nexusBefore = (await nexus.read.balanceOf([user1.account.address]));
 
       await tcgv.write.approve([routerAddress, sellAmount], { account: user1.account });
       await router.write.swapExactTokensForETH([
@@ -269,27 +286,27 @@ describe("TCGVaultToken", function () {
         (await publicClient.getBlock()).timestamp + 300n
       ], { account: user1.account });
 
-      const vaultAfter = await tcgv.read.balanceOf([vault.account.address]);
-      const marketingAfter = await tcgv.read.balanceOf([marketing.account.address]);
-      const communityAfter = await tcgv.read.balanceOf([community.account.address]);
-      const totalSupplyAfter = await tcgv.read.totalSupply();
-      const nexusAfter = await nexus.read.balanceOf([user1.account.address]);
+      const vaultAfter = (await tcgv.read.balanceOf([vault.account.address]));
+      const marketingAfter = (await tcgv.read.balanceOf([marketing.account.address]));
+      const communityAfter = (await tcgv.read.balanceOf([community.account.address]));
+      const totalSupplyAfter = (await tcgv.read.totalSupply());
+      const nexusAfter = (await nexus.read.balanceOf([user1.account.address]));
 
-      expect(vaultAfter - vaultBefore).to.be.gte(0);
-      expect(marketingAfter - marketingBefore).to.be.gte(0);
-      expect(communityAfter - communityBefore).to.be.gte(0);
-      expect(totalSupplyBefore - totalSupplyAfter).to.be.gt(0);
+      expect(vaultAfter - vaultBefore >= 0n).to.equal(true);
+      expect(marketingAfter - marketingBefore >= 0n).to.equal(true);
+      expect(communityAfter - communityBefore >= 0n).to.equal(true);
+      expect(totalSupplyBefore - totalSupplyAfter > 0n).to.equal(true);
       expect(nexusAfter).to.equal(nexusBefore);
     });
   });
 
-  describe("Liquidity wrapper: add/remove without fees", function () {
-    it("addLiquidityETH via wrapper does not charge fees on token transfer to pair", async function () {
+  describe("Liquidity wrapper: add/remove without fees", () => {
+    it("addLiquidityETH via wrapper does not charge fees on token transfer to pair", async () => {
       const addTokenAmount = parseEther("1000");
       const addEthAmount = parseEther("0.1");
-      const userBalanceBefore = await tcgv.read.balanceOf([user1.account.address]);
-      const pairBalanceBefore = await tcgv.read.balanceOf([pairAddress]);
-      const totalSupplyBefore = await tcgv.read.totalSupply();
+      const userBalanceBefore = (await tcgv.read.balanceOf([user1.account.address]));
+      const pairBalanceBefore = (await tcgv.read.balanceOf([pairAddress]));
+      const totalSupplyBefore = (await tcgv.read.totalSupply());
 
       await tcgv.write.approve([wrapperAddress, addTokenAmount], { account: user1.account });
       await wrapper.write.addLiquidityETH([
@@ -301,18 +318,18 @@ describe("TCGVaultToken", function () {
         (await publicClient.getBlock()).timestamp + 300n
       ], { value: addEthAmount, account: user1.account });
 
-      const pairBalanceAfter = await tcgv.read.balanceOf([pairAddress]);
-      const totalSupplyAfter = await tcgv.read.totalSupply();
+      const pairBalanceAfter = (await tcgv.read.balanceOf([pairAddress]));
+      const totalSupplyAfter = (await tcgv.read.totalSupply());
 
       expect(pairBalanceAfter - pairBalanceBefore).to.equal(addTokenAmount);
       expect(totalSupplyAfter).to.equal(totalSupplyBefore);
     });
 
-    it("removeLiquidityETH via wrapper does not charge fees", async function () {
-      const lpBalance = await pair.read.balanceOf([user1.account.address]);
-      if (lpBalance === 0n) return this.skip();
-      const userTcgvBefore = await tcgv.read.balanceOf([user1.account.address]);
-      const totalSupplyBefore = await tcgv.read.totalSupply();
+    it("removeLiquidityETH via wrapper does not charge fees", async (t) => {
+      const lpBalance = (await pair.read.balanceOf([user1.account.address]));
+      if (lpBalance === 0n) return t.skip();
+      const userTcgvBefore = (await tcgv.read.balanceOf([user1.account.address]));
+      const totalSupplyBefore = (await tcgv.read.totalSupply());
 
       await pair.write.approve([wrapperAddress, lpBalance], { account: user1.account });
       await wrapper.write.removeLiquidityETH([
@@ -325,14 +342,14 @@ describe("TCGVaultToken", function () {
         (await publicClient.getBlock()).timestamp + 300n
       ], { account: user1.account });
 
-      const userTcgvAfter = await tcgv.read.balanceOf([user1.account.address]);
-      const totalSupplyAfter = await tcgv.read.totalSupply();
+      const userTcgvAfter = (await tcgv.read.balanceOf([user1.account.address]));
+      const totalSupplyAfter = (await tcgv.read.totalSupply());
 
-      expect(userTcgvAfter).to.be.gt(userTcgvBefore);
+      expect(userTcgvAfter > userTcgvBefore).to.equal(true);
       expect(totalSupplyAfter).to.equal(totalSupplyBefore);
     });
 
-    it("wrapper receive reverts when sender is not router", async function () {
+    it("wrapper receive reverts when sender is not router", async () => {
       let reverted = false;
       try {
         await owner.sendTransaction({ to: wrapperAddress, value: 1n, account: owner.account });
@@ -342,12 +359,13 @@ describe("TCGVaultToken", function () {
       expect(reverted).to.be.true;
     });
 
-    it("wrapper refunds excess token when router uses less than desired", async function () {
-      const [r0, r1] = await pair.read.getReserves();
-      if (r0 === 0n && r1 === 0n) return this.skip();
+    it("wrapper refunds excess token when router uses less than desired", async (t) => {
+      const reserves = (await pair.read.getReserves()) as [bigint, bigint, number];
+      const [r0, r1] = reserves;
+      if (r0 === 0n && r1 === 0n) return t.skip();
       const tokenDesired = parseEther("50000");
       const ethAmount = parseEther("0.5");
-      const userBalanceBefore = await tcgv.read.balanceOf([user1.account.address]);
+      const userBalanceBefore = (await tcgv.read.balanceOf([user1.account.address]));
       await tcgv.write.approve([wrapperAddress, tokenDesired], { account: user1.account });
       await wrapper.write.addLiquidityETH([
         tcgvAddress,
@@ -357,16 +375,16 @@ describe("TCGVaultToken", function () {
         user1.account.address,
         (await publicClient.getBlock()).timestamp + 300n
       ], { value: ethAmount, account: user1.account });
-      const userBalanceAfter = await tcgv.read.balanceOf([user1.account.address]);
+      const userBalanceAfter = (await tcgv.read.balanceOf([user1.account.address]));
       if (userBalanceAfter > userBalanceBefore - tokenDesired) {
-        expect(userBalanceAfter).to.be.gt(userBalanceBefore - tokenDesired);
+        expect(userBalanceAfter > userBalanceBefore - tokenDesired).to.equal(true);
       }
     });
   });
 
-  describe("Burn", function () {
-    it("buy burn reduces total supply", async function () {
-      const supplyBefore = await tcgv.read.totalSupply();
+  describe("Burn", () => {
+    it("buy burn reduces total supply", async () => {
+      const supplyBefore = (await tcgv.read.totalSupply());
       const ethIn = parseEther("0.2");
       const path = [wethAddress, tcgvAddress];
       await router.write.swapExactETHForTokens([
@@ -375,12 +393,12 @@ describe("TCGVaultToken", function () {
         user2.account.address,
         (await publicClient.getBlock()).timestamp + 300n
       ], { value: ethIn, account: user2.account });
-      const supplyAfter = await tcgv.read.totalSupply();
-      expect(supplyAfter).to.be.lt(supplyBefore);
+      const supplyAfter = (await tcgv.read.totalSupply());
+      expect(supplyAfter < supplyBefore).to.equal(true);
     });
 
-    it("sell burn reduces total supply", async function () {
-      const supplyBefore = await tcgv.read.totalSupply();
+    it("sell burn reduces total supply", async () => {
+      const supplyBefore = (await tcgv.read.totalSupply());
       const sellAmt = parseEther("1000");
       await tcgv.write.approve([routerAddress, sellAmt], { account: user2.account });
       const path = [tcgvAddress, wethAddress];
@@ -391,13 +409,13 @@ describe("TCGVaultToken", function () {
         user2.account.address,
         (await publicClient.getBlock()).timestamp + 300n
       ], { account: user2.account });
-      const supplyAfter = await tcgv.read.totalSupply();
-      expect(supplyAfter).to.be.lt(supplyBefore);
+      const supplyAfter = (await tcgv.read.totalSupply());
+      expect(supplyAfter < supplyBefore).to.equal(true);
     });
   });
 
-  describe("NEXUS Soulbound", function () {
-    it("NEXUS transfer reverts", async function () {
+  describe("NEXUS Soulbound", () => {
+    it("NEXUS transfer reverts", async () => {
       await nexus.write.mint([owner.account.address, parseEther("100")], { account: owner.account });
       let reverted = false;
       try {
@@ -408,104 +426,149 @@ describe("TCGVaultToken", function () {
       expect(reverted).to.be.true;
     });
 
-    it("NEXUS nonces returns value for account", async function () {
+    it("NEXUS nonces returns value for account", async () => {
       const n = await nexus.read.nonces([owner.account.address]);
       expect(n).to.be.a("bigint");
     });
 
-    it("NEXUS constructor reverts when minter is zero", async function () {
-      await expect(hre.viem.deployContract("TCGNexusToken", [ZERO], { account: owner.account })).to.be.rejectedWith(/ZeroAddress|revert/);
+    it("NEXUS constructor reverts when minter is zero", async () => {
+      await expectRevert(
+        viem.deployContract("TCGNexusToken", [ZERO], { client: { wallet: owner } })
+      );
     });
 
-    it("NEXUS setPresaleMinter reverts when not owner", async function () {
-      await expect(nexus.write.setPresaleMinter([user1.account.address, true], { account: user1.account })).to.be.rejectedWith(/Ownable|revert/);
+    it("NEXUS setPresaleMinter reverts when not owner", async () => {
+      await expectRevert(
+        nexus.write.setPresaleMinter([user1.account.address, true], { account: user1.account })
+      );
     });
 
-    it("NEXUS mintCashback reverts when not minter", async function () {
-      await expect(nexus.write.mintCashback([owner.account.address, parseEther("1")], { account: user1.account })).to.be.rejectedWith(/OnlyMinter|revert/);
+    it("NEXUS mintCashback reverts when not minter", async () => {
+      await expectRevert(
+        nexus.write.mintCashback([owner.account.address, parseEther("1")], { account: user1.account })
+      );
     });
 
-    it("NEXUS mintCashback reverts when recipient is zero or amount is zero", async function () {
-      const testMinter = await hre.viem.deployContract("TestNexusMinter", [], { account: owner.account });
-      const nexusMinter = await hre.viem.deployContract("TCGNexusToken", [testMinter.address], { account: owner.account });
+    it("NEXUS mintCashback reverts when recipient is zero or amount is zero", async () => {
+      const testMinter = await viem.deployContract("TestNexusMinter", [], { client: { wallet: owner } });
+      const nexusMinter = await viem.deployContract("TCGNexusToken", [testMinter.address], { client: { wallet: owner } });
       await nexusMinter.write.mint([owner.account.address, parseEther("100")], { account: owner.account });
-      await expect(testMinter.write.mintCashback([nexusMinter.address as `0x${string}`, ZERO, parseEther("1")], { account: owner.account })).to.be.rejectedWith(/ZeroAddress|revert/);
-      await expect(testMinter.write.mintCashback([nexusMinter.address as `0x${string}`, owner.account.address, 0n], { account: owner.account })).to.be.rejectedWith(/ZeroAmount|revert/);
+      await expectRevert(
+        testMinter.write.mintCashback(
+          [nexusMinter.address as `0x${string}`, ZERO, parseEther("1")],
+          { account: owner.account }
+        )
+      );
+      await expectRevert(
+        testMinter.write.mintCashback(
+          [nexusMinter.address as `0x${string}`, owner.account.address, 0n],
+          { account: owner.account }
+        )
+      );
     });
 
-    it("NEXUS mintPresaleBonus reverts when not presale minter", async function () {
-      await expect(nexus.write.mintPresaleBonus([owner.account.address, parseEther("1")], { account: user1.account })).to.be.rejectedWith(/OnlyPresaleMinter|revert/);
+    it("NEXUS mintPresaleBonus reverts when not presale minter", async () => {
+      await expectRevert(
+        nexus.write.mintPresaleBonus([owner.account.address, parseEther("1")], { account: user1.account })
+      );
     });
 
-    it("NEXUS mintPresaleBonus reverts when recipient is zero", async function () {
+    it("NEXUS mintPresaleBonus reverts when recipient is zero", async () => {
       await nexus.write.setPresaleMinter([owner.account.address, true], { account: owner.account });
-      await expect(nexus.write.mintPresaleBonus([ZERO, parseEther("1")], { account: owner.account })).to.be.rejectedWith(/ZeroAddress|revert/);
+      await expectRevert(
+        nexus.write.mintPresaleBonus([ZERO, parseEther("1")], { account: owner.account })
+      );
     });
 
-    it("NEXUS mintPresaleBonus reverts when amount is zero", async function () {
-      await expect(nexus.write.mintPresaleBonus([owner.account.address, 0n], { account: owner.account })).to.be.rejectedWith(/ZeroAmount|revert/);
+    it("NEXUS mintPresaleBonus reverts when amount is zero", async () => {
+      await expectRevert(
+        nexus.write.mintPresaleBonus([owner.account.address, 0n], { account: owner.account })
+      );
     });
 
-    it("NEXUS mint reverts when to is zero", async function () {
-      await expect(nexus.write.mint([ZERO, parseEther("1")], { account: owner.account })).to.be.rejectedWith(/ZeroAddress|revert/);
+    it("NEXUS mint reverts when to is zero", async () => {
+      await expectRevert(
+        nexus.write.mint([ZERO, parseEther("1")], { account: owner.account })
+      );
     });
   });
 
-  describe("TCGVaultToken branch coverage", function () {
-    it("setPair reverts when pair is zero", async function () {
-      await expect(tcgv.write.setPair([ZERO], { account: owner.account })).to.be.rejectedWith(/PairZeroAddress|revert/);
+  describe("TCGVaultToken branch coverage", () => {
+    it("setPair reverts when pair is zero", async () => {
+      await expectRevert(tcgv.write.setPair([ZERO], { account: owner.account }));
     });
 
-    it("setPairStatus reverts when not owner", async function () {
-      await expect(tcgv.write.setPairStatus([pairAddress, false], { account: user1.account })).to.be.rejectedWith(/Ownable|revert/);
+    it("setPairStatus reverts when not owner", async () => {
+      await expectRevert(
+        tcgv.write.setPairStatus([pairAddress, false], { account: user1.account })
+      );
     });
 
-    it("setFeesEnabled reverts when not owner", async function () {
-      await expect(tcgv.write.setFeesEnabled([false], { account: user1.account })).to.be.rejectedWith(/Ownable|revert/);
+    it("setFeesEnabled reverts when not owner", async () => {
+      await expectRevert(
+        tcgv.write.setFeesEnabled([false], { account: user1.account })
+      );
     });
 
-    it("setCashbackEnabled reverts when not owner", async function () {
-      await expect(tcgv.write.setCashbackEnabled([false], { account: user1.account })).to.be.rejectedWith(/Ownable|revert/);
+    it("setCashbackEnabled reverts when not owner", async () => {
+      await expectRevert(
+        tcgv.write.setCashbackEnabled([false], { account: user1.account })
+      );
     });
 
-    it("setMinAmounts reverts when not owner", async function () {
-      await expect(tcgv.write.setMinAmounts([0n, 0n], { account: user1.account })).to.be.rejectedWith(/Ownable|revert/);
+    it("setMinAmounts reverts when not owner", async () => {
+      await expectRevert(
+        tcgv.write.setMinAmounts([0n, 0n], { account: user1.account })
+      );
     });
 
-    it("setBuyRouter with zero does not set isExcludedFromFees", async function () {
+    it("setBuyRouter with zero does not set isExcludedFromFees", async () => {
       await tcgv.write.setBuyRouter([ZERO], { account: owner.account });
       expect(await tcgv.read.buyRouter()).to.equal(ZERO);
     });
 
-    it("recordBuyAndMintCashback early return when cashback disabled", async function () {
-      const testRouter = await hre.viem.deployContract("TestBuyRouter", [], { account: owner.account });
+    it("recordBuyAndMintCashback early return when cashback disabled", async () => {
+      const testRouter = await viem.deployContract("TestBuyRouter", [], {
+        client: { wallet: owner },
+      });
       await testRouter.write.setToken([tcgvAddress], { account: owner.account });
       await tcgv.write.setBuyRouter([testRouter.address], { account: owner.account });
       await tcgv.write.setCashbackEnabled([false], { account: owner.account });
       await testRouter.write.callRecordBuyAndMintCashback([owner.account.address, parseEther("100")], { account: owner.account });
     });
 
-    it("recordBuyAndMintCashback early return when cashbackAmount is zero", async function () {
-      const testRouter = await hre.viem.deployContract("TestBuyRouter", [], { account: owner.account });
+    it("recordBuyAndMintCashback early return when cashbackAmount is zero", async () => {
+      const testRouter = await viem.deployContract("TestBuyRouter", [], {
+        client: { wallet: owner },
+      });
       await testRouter.write.setToken([tcgvAddress], { account: owner.account });
       await tcgv.write.setBuyRouter([testRouter.address], { account: owner.account });
       await tcgv.write.setCashbackEnabled([true], { account: owner.account });
       await testRouter.write.callRecordBuyAndMintCashback([owner.account.address, 1n], { account: owner.account });
     });
 
-    it("burn early return when amount is zero", async function () {
-      const testRouter = await hre.viem.deployContract("TestBuyRouter", [], { account: owner.account });
+    it("burn early return when amount is zero", async () => {
+      const testRouter = await viem.deployContract("TestBuyRouter", [], {
+        client: { wallet: owner },
+      });
       await testRouter.write.setToken([tcgvAddress], { account: owner.account });
       await tcgv.write.setBuyRouter([testRouter.address], { account: owner.account });
       await testRouter.write.callBurn([0n], { account: owner.account });
     });
 
-    it("recordBuyAndMintCashback reverts when not buyRouter", async function () {
-      await expect(tcgv.write.recordBuyAndMintCashback([owner.account.address, parseEther("100")], { account: user1.account })).to.be.rejectedWith(/OnlyBuyRouter|revert/);
+    it("recordBuyAndMintCashback reverts when not buyRouter", async () => {
+      await expectRevert(
+        tcgv.write.recordBuyAndMintCashback(
+          [owner.account.address, parseEther("100")],
+          { account: user1.account }
+        )
+      );
     });
 
-    it("burn reverts when not buyRouter", async function () {
-      await expect(tcgv.write.burn([parseEther("1")], { account: user1.account })).to.be.rejectedWith(/OnlyBuyRouter|revert/);
+    it("burn reverts when not buyRouter", async () => {
+      await expectRevert(
+        tcgv.write.burn([parseEther("1")], { account: user1.account })
+      );
     });
   });
 

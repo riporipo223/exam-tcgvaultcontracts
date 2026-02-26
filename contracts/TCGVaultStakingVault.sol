@@ -31,6 +31,13 @@ contract TCGVaultStakingVault is ERC4626, Ownable {
         basicNFTContract = basicNFT_;
     }
 
+    function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal virtual override {
+        super._deposit(caller, receiver, assets, shares);
+        if (basicNFTContract != address(0) && minStakeForBasicNFT > 0 && balanceOf(receiver) >= minStakeForBasicNFT) {
+            ITCGVaultBasicNFT(basicNFTContract).mintFor(receiver);
+        }
+    }
+
     function _withdraw(
         address caller,
         address receiver,

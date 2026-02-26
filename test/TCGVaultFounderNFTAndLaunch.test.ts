@@ -2,48 +2,62 @@
  * Tests for Founder NFT and Initial Launch (whitepaper §6, §7).
  * Uses mock ERC20 for USDC and TCGV to avoid deploying full TCGVaultToken.
  */
+import { describe, it, before } from "node:test";
 import { expect } from "chai";
-import * as hre from "hardhat";
+import hre from "hardhat";
 import { getAddress, parseEther } from "viem";
+import type { ContractReturnType } from "@nomicfoundation/hardhat-viem/types";
 
-describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", function () {
-  let owner: Awaited<ReturnType<typeof hre.viem.getWalletClients>>[0];
-  let user1: Awaited<ReturnType<typeof hre.viem.getWalletClients>>[0];
-  let usdc: ReturnType<typeof hre.viem.getContractAt>;
-  let nexus: Awaited<ReturnType<typeof hre.viem.deployContract>>;
-  let founderNFT: Awaited<ReturnType<typeof hre.viem.deployContract>>;
-  let initialLaunch: Awaited<ReturnType<typeof hre.viem.deployContract>>;
-  let tcgv: ReturnType<typeof hre.viem.getContractAt>;
+const { viem, networkHelpers } = await hre.network.connect();
+
+async function expectRevert(promise: Promise<unknown>) {
+  let reverted = false;
+  try {
+    await promise;
+  } catch {
+    reverted = true;
+  }
+  expect(reverted).to.equal(true);
+}
+
+describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
+  let owner: Awaited<ReturnType<typeof viem.getWalletClients>>[0];
+  let user1: Awaited<ReturnType<typeof viem.getWalletClients>>[0];
+  let usdc: ContractReturnType<"MockWETH">;
+  let nexus: ContractReturnType<"TCGNexusToken">;
+  let founderNFT: ContractReturnType<"TCGVaultFounderNFT">;
+  let initialLaunch: ContractReturnType<"TCGVaultInitialLaunch">;
+  let tcgv: ContractReturnType<"MockWETH">;
 
   const WAVE1_PRICE = 200 * 1e6;
   const WAVE2_PRICE = 350 * 1e6;
 
-  before(async function () {
-    [owner, user1] = await hre.viem.getWalletClients();
+  before(async () => {
+    [owner, user1] = await viem.getWalletClients();
 
-    const mockUsdc = await hre.viem.deployContract("MockWETH", [], { account: owner.account });
-    usdc = await hre.viem.getContractAt("MockWETH", mockUsdc.address);
+    const mockUsdc = await viem.deployContract("MockWETH", [], { client: { wallet: owner } });
+    usdc = await viem.getContractAt("MockWETH", mockUsdc.address);
     await usdc.write.deposit({ value: parseEther("100"), account: owner.account });
     await usdc.write.transfer([user1.account.address, parseEther("50")], { account: owner.account });
 
-    const mockTcgv = await hre.viem.deployContract("MockWETH", [], { account: owner.account });
-    tcgv = await hre.viem.getContractAt("MockWETH", mockTcgv.address);
+    const mockTcgv = await viem.deployContract("MockWETH", [], { client: { wallet: owner } });
+    tcgv = await viem.getContractAt("MockWETH", mockTcgv.address);
     await tcgv.write.deposit({ value: parseEther("1000"), account: owner.account });
 
-    nexus = await hre.viem.deployContract("TCGNexusToken", [owner.account.address], { account: owner.account });
+    nexus = await viem.deployContract("TCGNexusToken", [owner.account.address], { client: { wallet: owner } });
 
-    founderNFT = await hre.viem.deployContract("TCGVaultFounderNFT", [
+    founderNFT = await viem.deployContract("TCGVaultFounderNFT", [
       usdc.address,
       nexus.address,
       owner.account.address,
-    ], { account: owner.account });
-    initialLaunch = await hre.viem.deployContract("TCGVaultInitialLaunch", [
+    ], { client: { wallet: owner } });
+    initialLaunch = await viem.deployContract("TCGVaultInitialLaunch", [
       tcgv.address,
       usdc.address,
       founderNFT.address,
       nexus.address,
       owner.account.address,
-    ], { account: owner.account });
+    ], { client: { wallet: owner } });
 
     await nexus.write.setPresaleMinter([founderNFT.address, true], { account: owner.account });
     await nexus.write.setPresaleMinter([initialLaunch.address, true], { account: owner.account });
@@ -52,18 +66,21 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", function () {
     await tcgv.write.transfer([initialLaunch.address, parseEther("1000")], { account: owner.account });
   });
 
-  describe("TCGVaultFounderNFT", function () {
-    it("wave 1: first mint at 200 USDC, buyer gets 30% NEXUS", async function () {
-      await usdc.write.approve([founderNFT.address, WAVE1_PRICE], { account: user1.account });
-      const nexusBefore = await nexus.read.balanceOf([user1.account.address]);
+  describe("TCGVaultFounderNFT", () => {
+    it("wave 1: first mint at 200 USDC, buyer gets 30% NEXUS", async () => {
+      await usdc.write.approve([founderNFT.address, BigInt(WAVE1_PRICE)], { account: user1.account });
+      const nexusBefore = (await nexus.read.balanceOf([user1.account.address]));
       await founderNFT.write.mint({ account: user1.account });
-      const nexusAfter = await nexus.read.balanceOf([user1.account.address]);
+      const nexusAfter = (await nexus.read.balanceOf([user1.account.address]));
       const expectedNexus = (BigInt(WAVE1_PRICE) * 3000n * (10n ** 18n)) / (10000n * (10n ** 6n));
       expect(nexusAfter - nexusBefore).to.equal(expectedNexus);
       expect(await founderNFT.read.currentWave()).to.equal(1n);
     });
 
-    it("after 245 mints wave2StartTimestamp is set and wave 2 price is 350 USDC", async function () {
+    it(
+      "after 245 mints wave2StartTimestamp is set and wave 2 price is 350 USDC",
+      { timeout: 120000 },
+      async () => {
       const sold = await founderNFT.read.soldCount();
       const toMint = 245 - Number(sold);
       if (toMint <= 0) return;
@@ -73,168 +90,173 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", function () {
         await founderNFT.write.mint({ account: owner.account });
       }
       expect(await founderNFT.read.soldCount()).to.equal(245n);
-      expect(await founderNFT.read.wave2StartTimestamp()).to.be.gt(0);
+        const wave2Start = (await founderNFT.read.wave2StartTimestamp());
+        expect(wave2Start > 0n).to.equal(true);
       expect(await founderNFT.read.currentPrice()).to.equal(BigInt(WAVE2_PRICE));
       expect(await founderNFT.read.currentWave()).to.equal(2n);
-    }).timeout(120000);
+      }
+    );
 
-    it("owner can mint 10 community Founder NFTs", async function () {
+    it("owner can mint 10 community Founder NFTs", async () => {
       expect(await founderNFT.read.communityMinted()).to.equal(0n);
       await founderNFT.write.mintCommunity([user1.account.address], { account: owner.account });
       expect(await founderNFT.read.communityMinted()).to.equal(1n);
-      expect(getAddress(await founderNFT.read.ownerOf([490]))).to.equal(getAddress(user1.account.address));
+      expect(getAddress((await founderNFT.read.ownerOf([490n])) as `0x${string}`)).to.equal(getAddress(user1.account.address));
     });
 
-    it("owner can setBaseURI and tokenURI returns base + tokenId", async function () {
+    it("owner can setBaseURI and tokenURI returns base + tokenId", async () => {
       await founderNFT.write.setBaseURI(["https://api.tcg-vault.io/founder/"], { account: owner.account });
-      const uri = await founderNFT.read.tokenURI([0n]);
+      const uri = (await founderNFT.read.tokenURI([0n])) as string;
       expect(uri).to.equal("https://api.tcg-vault.io/founder/0");
     });
 
-    it("owner can setTreasury", async function () {
+    it("owner can setTreasury", async () => {
       await founderNFT.write.setTreasury([user1.account.address], { account: owner.account });
-      expect(getAddress(await founderNFT.read.treasury())).to.equal(getAddress(user1.account.address));
+      expect(getAddress((await founderNFT.read.treasury()) as `0x${string}`)).to.equal(getAddress(user1.account.address));
     });
 
-    it("setTreasury reverts when not owner", async function () {
-      await expect(founderNFT.write.setTreasury([user1.account.address], { account: user1.account })).to.be.rejectedWith(/Ownable|revert/);
+    it("setTreasury reverts when not owner", async () => {
+      await expectRevert(
+        founderNFT.write.setTreasury([user1.account.address], { account: user1.account })
+      );
     });
 
-    it("setBaseURI reverts when not owner", async function () {
-      await expect(founderNFT.write.setBaseURI(["https://bad/"], { account: user1.account })).to.be.rejectedWith(/Ownable|revert/);
+    it("setBaseURI reverts when not owner", async () => {
+      await expectRevert(
+        founderNFT.write.setBaseURI(["https://bad/"], { account: user1.account })
+      );
     });
 
-    it("mintCommunity reverts when not owner", async function () {
-      await expect(founderNFT.write.mintCommunity([user1.account.address], { account: user1.account })).to.be.rejectedWith(/Ownable|revert/);
+    it("mintCommunity reverts when not owner", async () => {
+      await expectRevert(
+        founderNFT.write.mintCommunity([user1.account.address], { account: user1.account })
+      );
     });
 
-    it("mintCommunity reverts when ExceedsReserved", async function () {
+    it("mintCommunity reverts when ExceedsReserved", async () => {
       const already = await founderNFT.read.communityMinted();
       const toMint = 10 - Number(already);
       for (let i = 0; i < toMint; i++) {
         await founderNFT.write.mintCommunity([user1.account.address], { account: owner.account });
       }
-      await expect(founderNFT.write.mintCommunity([user1.account.address], { account: owner.account })).to.be.rejectedWith(/ExceedsReserved|revert/);
+      await expectRevert(
+        founderNFT.write.mintCommunity([user1.account.address], { account: owner.account })
+      );
     });
   });
 
-  describe("TCGVaultInitialLaunch", function () {
-    it("buy reverts when usdcAmount is zero", async function () {
-      await expect(initialLaunch.write.buy([0n], { account: user1.account })).to.be.rejectedWith(/ZeroAmount|revert/);
+  describe("TCGVaultInitialLaunch", () => {
+    it("buy reverts when usdcAmount is zero", async () => {
+      await expectRevert(initialLaunch.write.buy([0n], { account: user1.account }));
     });
 
-    it("wave 2: price 0.008 USDC/TCGV, 4% cap per wallet, 30% NEXUS on buy", async function () {
+    it("wave 2: price 0.008 USDC/TCGV, 4% cap per wallet, 30% NEXUS on buy", async () => {
       // Use 8 USDC so 10% TGE fits in contract's 1000 TCGV for finalize/claim test
       const usdcAmount = 8 * 1e6;
-      await usdc.write.approve([initialLaunch.address, usdcAmount], { account: user1.account });
-      const nexusBefore = await nexus.read.balanceOf([user1.account.address]);
+      await usdc.write.approve([initialLaunch.address, BigInt(usdcAmount)], { account: user1.account });
+      const nexusBefore = (await nexus.read.balanceOf([user1.account.address]));
       await initialLaunch.write.buy([BigInt(usdcAmount)], { account: user1.account });
-      const nexusAfter = await nexus.read.balanceOf([user1.account.address]);
+      const nexusAfter = (await nexus.read.balanceOf([user1.account.address]));
       const expectedNexus = (BigInt(usdcAmount) * 3000n * (10n ** 18n)) / (10000n * (10n ** 6n));
       expect(nexusAfter - nexusBefore).to.equal(expectedNexus);
-      const u = await initialLaunch.read.allocations([user1.account.address]);
+      const u = (await initialLaunch.read.allocations([user1.account.address])) as readonly [bigint, bigint];
       // 0.008 USDC/TCGV => price = 8000 (6 decimals), tcgvAmount = usdcAmount * 1e18 / 8000
       expect(u[0]).to.equal((BigInt(usdcAmount) * (10n ** 18n)) / 8000n);
     });
 
-    it("non-owner cannot finalize before 120h countdown or hard cap", async function () {
+    it("non-owner cannot finalize before 120h countdown or hard cap", async (t) => {
       const endTime = await initialLaunch.read.presaleEndTime();
       if (endTime === BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")) {
-        this.skip();
-        return;
+        return t.skip();
       }
       if (await initialLaunch.read.tgeTimestamp() !== 0n) {
-        this.skip();
-        return;
+        return t.skip();
       }
-      await expect(initialLaunch.write.finalize({ account: user1.account })).to.be.rejected;
+      await expectRevert(initialLaunch.write.finalize({ account: user1.account }));
     });
 
-    it("buy reverts after 120h countdown", async function () {
+    it("buy reverts after 120h countdown", async (t) => {
       // Requires wave2StartTimestamp set (e.g. by "after 245 mints" test)
       const endTime = await initialLaunch.read.presaleEndTime();
       if (endTime === BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")) {
-        this.skip();
-        return;
+        return t.skip();
       }
-      await hre.network.provider.request({
-        method: "evm_increaseTime",
-        params: [121 * 3600],
-      });
-      await hre.network.provider.request({ method: "evm_mine", params: [] });
-      await usdc.write.approve([initialLaunch.address, 1000 * 1e6], { account: user1.account });
-      await expect(initialLaunch.write.buy([BigInt(1000 * 1e6)], { account: user1.account }))
-        .to.be.rejected;
+      await networkHelpers.time.increase(121 * 3600);
+      await networkHelpers.mine();
+      await usdc.write.approve([initialLaunch.address, BigInt(1000 * 1e6)], { account: user1.account });
+      await expectRevert(initialLaunch.write.buy([BigInt(1000 * 1e6)], { account: user1.account }));
     });
 
-    it("finalize and claim vesting 10% TGE", async function () {
+    it("finalize and claim vesting 10% TGE", async () => {
       await initialLaunch.write.finalize({ account: owner.account });
-      const releasable = await initialLaunch.read.releasable([user1.account.address]);
-      const allocation = await initialLaunch.read.allocations([user1.account.address]);
+      const releasable = (await initialLaunch.read.releasable([user1.account.address]));
+      const allocation = (await initialLaunch.read.allocations([user1.account.address])) as readonly [bigint, bigint];
       expect(releasable).to.equal((allocation[0] * 10n) / 100n);
       await initialLaunch.write.claim({ account: user1.account });
       expect(await tcgv.read.balanceOf([user1.account.address])).to.equal(releasable);
     });
 
-    it("owner can setTreasury on InitialLaunch", async function () {
+    it("owner can setTreasury on InitialLaunch", async () => {
       await initialLaunch.write.setTreasury([user1.account.address], { account: owner.account });
-      expect(getAddress(await initialLaunch.read.treasury())).to.equal(getAddress(user1.account.address));
+      expect(getAddress((await initialLaunch.read.treasury()) as `0x${string}`)).to.equal(getAddress(user1.account.address));
     });
 
-    it("InitialLaunch setTreasury reverts when not owner", async function () {
-      await expect(initialLaunch.write.setTreasury([user1.account.address], { account: user1.account })).to.be.rejectedWith(/Ownable|revert/);
+    it("InitialLaunch setTreasury reverts when not owner", async () => {
+      await expectRevert(
+        initialLaunch.write.setTreasury([user1.account.address], { account: user1.account })
+      );
     });
 
-    it("presaleEndTime returns max when wave2 not started", async function () {
-      const freshFounder = await hre.viem.deployContract("TCGVaultFounderNFT", [
+    it("presaleEndTime returns max when wave2 not started", async () => {
+      const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
         usdc.address,
         nexus.address,
         owner.account.address,
-      ], { account: owner.account });
-      const launchNoWave2 = await hre.viem.deployContract("TCGVaultInitialLaunch", [
+      ], { client: { wallet: owner } });
+      const launchNoWave2 = await viem.deployContract("TCGVaultInitialLaunch", [
         tcgv.address,
         usdc.address,
         freshFounder.address,
         nexus.address,
         owner.account.address,
-      ], { account: owner.account });
+      ], { client: { wallet: owner } });
       const end = await launchNoWave2.read.presaleEndTime();
       expect(end).to.equal(BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
     });
 
-    it("releasable returns 0 for user with no allocation", async function () {
-      const [,, u2] = await hre.viem.getWalletClients();
+    it("releasable returns 0 for user with no allocation", async () => {
+      const [, , u2] = await viem.getWalletClients();
       const r = await initialLaunch.read.releasable([u2.account.address]);
       expect(r).to.equal(0n);
     });
 
-    it("claim reverts when nothing to claim", async function () {
-      const [,, u2] = await hre.viem.getWalletClients();
-      await expect(initialLaunch.write.claim({ account: u2.account })).to.be.rejectedWith(/NothingToClaim|revert/);
+    it("claim reverts when nothing to claim", async () => {
+      const [, , u2] = await viem.getWalletClients();
+      await expectRevert(initialLaunch.write.claim({ account: u2.account }));
     });
 
-    it("claim reverts when not finalized", async function () {
-      const launchNoFinalize = await hre.viem.deployContract("TCGVaultInitialLaunch", [
+    it("claim reverts when not finalized", async () => {
+      const launchNoFinalize = await viem.deployContract("TCGVaultInitialLaunch", [
         tcgv.address,
         usdc.address,
         founderNFT.address,
         nexus.address,
         owner.account.address,
-      ], { account: owner.account });
-      await expect(launchNoFinalize.write.claim({ account: user1.account })).to.be.rejectedWith(/NotFinalized|revert/);
+      ], { client: { wallet: owner } });
+      await expectRevert(launchNoFinalize.write.claim({ account: user1.account }));
     });
 
-    it("basicNFTSoldCount returns 0 when staticcall fails (EOA)", async function () {
-      const [u0] = await hre.viem.getWalletClients();
+    it("basicNFTSoldCount returns 0 when staticcall fails (EOA)", async () => {
+      const [u0] = await viem.getWalletClients();
       const count = await initialLaunch.read.basicNFTSoldCount([u0.account.address]);
       expect(count).to.equal(0n);
     });
 
-    it("basicNFTSoldCount returns 0 for zero address", async function () {
+    it("basicNFTSoldCount returns 0 for zero address", async () => {
       expect(await initialLaunch.read.basicNFTSoldCount(["0x0000000000000000000000000000000000000000"])).to.equal(0n);
     });
 
-    it("basicNFTSoldCount returns totalSupply for contract with totalSupply()", async function () {
+    it("basicNFTSoldCount returns totalSupply for contract with totalSupply()", async () => {
       const count = await initialLaunch.read.basicNFTSoldCount([tcgv.address]);
       expect(count).to.equal(await tcgv.read.totalSupply());
     });

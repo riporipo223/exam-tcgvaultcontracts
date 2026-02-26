@@ -42,7 +42,8 @@ const SELL_VAULT_BP = 400; // 4% of total
 const SELL_BURN_BP = 100; // 1% of total
 
 async function main() {
-  const wallets = await hre.viem.getWalletClients();
+  const { viem } = await hre.network.connect();
+  const wallets = await viem.getWalletClients();
   if (!wallets || wallets.length < 5) {
     throw new Error("Need at least 5 wallet accounts (deployer, trader, vault, marketing, community)");
   }
@@ -55,7 +56,7 @@ async function main() {
   const marketingAddr = marketingWallet.account.address as Address;
   const communityAddr = communityWallet.account.address as Address;
 
-  const publicClient = await hre.viem.getPublicClient();
+  const publicClient = await viem.getPublicClient();
   const deadline = BigInt(Math.floor(Date.now() / 1000) + 600);
 
   console.log("=".repeat(80));
@@ -74,8 +75,8 @@ async function main() {
   console.log(`Community:      ${communityAddr}`);
   console.log();
 
-  const pancakeRouter = await hre.viem.getContractAt("PancakeRouter", PANCAKE_ROUTER);
-  const pancakeFactory = await hre.viem.getContractAt("PancakeFactory", PANCAKE_FACTORY);
+  const pancakeRouter = await viem.getContractAt("PancakeRouter", PANCAKE_ROUTER);
+  const pancakeFactory = await viem.getContractAt("PancakeFactory", PANCAKE_FACTORY);
   const wbnbAddress = (await pancakeRouter.read.WETH()) as Address;
   console.log("PancakeSwap Router:", PANCAKE_ROUTER);
   console.log("PancakeSwap Factory:", PANCAKE_FACTORY);
@@ -91,24 +92,24 @@ async function main() {
   let nonce = await publicClient.getTransactionCount({ address: deployer.account.address });
 
   console.log("1.1 Deploying TCGVaultToken...");
-  await hre.viem.deployContract("TCGVaultToken", [
+  await viem.deployContract("TCGVaultToken", [
     PANCAKE_ROUTER,
     vaultAddr,
     marketingAddr,
     communityAddr,
     zeroAddress,
     zeroAddress,
-  ], { account: deployer.account });
+  ], { client: { wallet: deployer } });
   const tokenAddress = getContractAddress({ from: deployer.account.address, nonce: BigInt(nonce++) }) as Address;
-  const token = await hre.viem.getContractAt("TCGVaultToken", tokenAddress);
+  const token = await viem.getContractAt("TCGVaultToken", tokenAddress);
   console.log(`    TCGVaultToken: ${tokenAddress}`);
-  console.log(`    Total supply:  ${formatEther((await token.read.totalSupply()) as bigint)} TCGV`);
+  console.log(`    Total supply:  ${formatEther((await token.read.totalSupply()))} TCGV`);
   console.log();
 
   console.log("1.2 Deploying TCGNexusToken...");
-  await hre.viem.deployContract("contracts/TCGNexusToken.sol:TCGNexusToken", [tokenAddress], { account: deployer.account });
+  await viem.deployContract("contracts/TCGNexusToken.sol:TCGNexusToken", [tokenAddress], { client: { wallet: deployer } });
   const nexusTokenAddress = getContractAddress({ from: deployer.account.address, nonce: BigInt(nonce++) }) as Address;
-  const nexusToken = await hre.viem.getContractAt("TCGNexusToken", nexusTokenAddress);
+  const nexusToken = await viem.getContractAt("TCGNexusToken", nexusTokenAddress);
   console.log(`    TCGNexusToken: ${nexusTokenAddress}`);
   console.log();
 
@@ -124,21 +125,21 @@ async function main() {
   console.log();
 
   console.log("1.4 Deploying TCGVaultBuyRouter...");
-  const buyRouter = await hre.viem.deployContract("TCGVaultBuyRouter", [
+  const buyRouter = await viem.deployContract("TCGVaultBuyRouter", [
     PANCAKE_ROUTER,
     tokenAddress,
     vaultAddr,
     marketingAddr,
     communityAddr,
-  ], { account: deployer.account });
+  ], { client: { wallet: deployer } });
   const buyRouterAddress = buyRouter.address as Address;
   await token.write.setBuyRouter([buyRouterAddress], { account: deployer.account });
   console.log(`    TCGVaultBuyRouter: ${buyRouterAddress} (set as buy router)`);
   console.log();
 
   console.log("1.5 Deploying TCGVaultLiquidityWrapper...");
-  const wrapper = await hre.viem.deployContract("contracts/TCGVaultLiquidityWrapper.sol:TCGVaultLiquidityWrapper", [PANCAKE_ROUTER], {
-    account: deployer.account,
+  const wrapper = await viem.deployContract("contracts/TCGVaultLiquidityWrapper.sol:TCGVaultLiquidityWrapper", [PANCAKE_ROUTER], {
+    client: { wallet: deployer },
   });
   const wrapperAddress = wrapper.address as Address;
   await token.write.setExcludedFromFees([wrapperAddress, true], { account: deployer.account });
@@ -171,7 +172,7 @@ async function main() {
   const tokenAmount = parseEther("1000000");
   const ethAmount = parseEther("10");
   await token.write.approve([wrapperAddress, tokenAmount], { account: deployer.account });
-  const addLiqHash = await (wrapper as any).write.addLiquidityETH([
+  const addLiqHash = await wrapper.write.addLiquidityETH([
     tokenAddress,
     tokenAmount,
     0n,
@@ -181,7 +182,7 @@ async function main() {
   ], { value: ethAmount, account: deployer.account });
   await publicClient.waitForTransactionReceipt({ hash: addLiqHash });
   console.log(`    Liquidity: ${formatEther(tokenAmount)} TCGV + ${formatEther(ethAmount)} BNB`);
-  const pair = await hre.viem.getContractAt("contracts/test/PancakePair.sol:PancakePair", pairAddress);
+  const pair = await viem.getContractAt("contracts/test/PancakePair.sol:PancakePair", pairAddress);
   const [reserve0, reserve1] = await (pair as any).read.getReserves();
   const token0 = await (pair as any).read.token0();
   const isToken0TCGV = token0.toLowerCase() === tokenAddress.toLowerCase();
@@ -199,7 +200,7 @@ async function main() {
   const path = [wbnbAddress, tokenAddress];
   let minAmountOutRouter = 0n;
   try {
-    const amountsOut = await pancakeRouter.read.getAmountsOut([parseEther("0.1"), path]);
+    const amountsOut = (await pancakeRouter.read.getAmountsOut([parseEther("0.1"), path]));
     minAmountOutRouter = amountsOut[1] > 0n ? (amountsOut[1] * 50n) / 100n : 0n;
   } catch {
     minAmountOutRouter = 0n;
@@ -207,9 +208,9 @@ async function main() {
 
   console.log("3.1 Buy via PancakeSwap router (swapExactETHForTokensSupportingFeeOnTransferTokens)...");
   const buyAmountBNB = parseEther("0.1");
-  const traderTcgvBefore1 = (await token.read.balanceOf([trader.account.address])) as bigint;
-  const vaultTcgvBefore1 = (await token.read.balanceOf([vaultAddr])) as bigint;
-  const supplyBefore1 = (await token.read.totalSupply()) as bigint;
+  const traderTcgvBefore1 = (await token.read.balanceOf([trader.account.address]));
+  const vaultTcgvBefore1 = (await token.read.balanceOf([vaultAddr]));
+  const supplyBefore1 = (await token.read.totalSupply());
 
   const swapCalldata = encodeFunctionData({
     abi: pancakeRouter.abi,
@@ -226,10 +227,10 @@ async function main() {
     throw new Error(`Pancake buy reverted: ${JSON.stringify(swapReceipt)}`);
   }
 
-  const traderTcgvAfter1 = (await token.read.balanceOf([trader.account.address])) as bigint;
-  const vaultTcgvAfter1 = (await token.read.balanceOf([vaultAddr])) as bigint;
-  const supplyAfter1 = (await token.read.totalSupply()) as bigint;
-  const nexusBal1 = (await nexusToken.read.balanceOf([trader.account.address])) as bigint;
+  const traderTcgvAfter1 = (await token.read.balanceOf([trader.account.address]));
+  const vaultTcgvAfter1 = (await token.read.balanceOf([vaultAddr]));
+  const supplyAfter1 = (await token.read.totalSupply());
+  const nexusBal1 = (await nexusToken.read.balanceOf([trader.account.address]));
   const traderDelta1 = traderTcgvAfter1 - traderTcgvBefore1;
   const vaultDelta1 = vaultTcgvAfter1 - vaultTcgvBefore1;
   const burn1 = supplyBefore1 - supplyAfter1;
@@ -265,7 +266,7 @@ async function main() {
   try {
     await publicClient.simulateContract({
       address: buyRouterAddress,
-      abi: (buyRouter as any).abi,
+      abi: buyRouter.abi,
       functionName: "buyTCGVWithBNB",
       args: [0n, deadline],
       value: buyRouterBNB,
@@ -297,7 +298,7 @@ async function main() {
     try {
       await publicClient.simulateContract({
         address: buyRouterAddress,
-        abi: (buyRouter as any).abi,
+        abi: buyRouter.abi,
         functionName: "buyTCGVWithBNB",
         args: [0n, deadline],
         value: buyRouterBNB,
@@ -316,8 +317,8 @@ async function main() {
   }
 
   const blockNum = buyRouterReceipt.blockNumber;
-  const routerVaultAddr = (await (buyRouter as any).read.vault()) as Address;
-  const routerMarketingAddr = (await (buyRouter as any).read.marketing()) as Address;
+  const routerVaultAddr = (await buyRouter.read.vault()) as Address;
+  const routerMarketingAddr = (await buyRouter.read.marketing()) as Address;
   if (routerVaultAddr.toLowerCase() !== vaultAddr.toLowerCase()) {
     throw new Error(`3.2 BuyRouter vault ${routerVaultAddr} != vault ${vaultAddr}`);
   }
@@ -338,14 +339,14 @@ async function main() {
   const expectedMarketingBNBMin = (buyRouterBNB * BigInt(BUY_MARKETING_BP)) / 10000n;
   const expectedVaultPlusMarketingBNB = expectedVaultBNBMin + expectedMarketingBNBMin;
 
-  const traderTcgvAfter2 = (await token.read.balanceOf([trader.account.address])) as bigint;
+  const traderTcgvAfter2 = (await token.read.balanceOf([trader.account.address]));
   const vaultBNBAfter2 = await publicClient.getBalance({ address: vaultAddr });
   const marketingBNBAfter2 = await publicClient.getBalance({ address: marketingAddr });
-  const nexusAfter2 = (await nexusToken.read.balanceOf([trader.account.address])) as bigint;
-  const traderTcgvDelta2 = traderTcgvAfter2 - traderTcgvBefore2;
+  const nexusAfter2 = (await nexusToken.read.balanceOf([trader.account.address]));
+  const traderTcgvDelta2 = traderTcgvAfter2 - (traderTcgvBefore2);
   const vaultBNBDelta2 = vaultBNBAfter2 - vaultBNBBefore2;
   const marketingBNBDelta2 = marketingBNBAfter2 - marketingBNBBefore2;
-  const nexusDelta2 = nexusAfter2 - nexusBefore2;
+  const nexusDelta2 = nexusAfter2 - (nexusBefore2);
   if (traderTcgvDelta2 === 0n) {
     throw new Error("3.2 Buy via TCGVaultBuyRouter: trader received 0 TCGV");
   }
@@ -395,12 +396,12 @@ async function main() {
   console.log();
 
   console.log("3.3 Direct pair swap (WBNB → TCGV, no router)...");
-  const wbnb = await hre.viem.getContractAt("WBNB", wbnbAddress);
+  const wbnb = await viem.getContractAt("WBNB", wbnbAddress);
   const directBNB = parseEther("0.05");
   await wbnb.write.deposit({ value: directBNB, account: trader.account });
 
-  const traderTcgvBefore3 = (await token.read.balanceOf([trader.account.address])) as bigint;
-  const supplyBefore3 = (await token.read.totalSupply()) as bigint;
+  const traderTcgvBefore3 = (await token.read.balanceOf([trader.account.address]));
+  const supplyBefore3 = (await token.read.totalSupply());
   const [r0, r1] = await (pair as any).read.getReserves();
   const tcgvR = isToken0TCGV ? r0 : r1;
   const wbnbR = isToken0TCGV ? r1 : r0;
@@ -426,8 +427,8 @@ async function main() {
   });
   await publicClient.waitForTransactionReceipt({ hash: directHash });
 
-  const traderTcgvAfter3 = (await token.read.balanceOf([trader.account.address])) as bigint;
-  const supplyAfter3 = (await token.read.totalSupply()) as bigint;
+  const traderTcgvAfter3 = (await token.read.balanceOf([trader.account.address]));
+  const supplyAfter3 = (await token.read.totalSupply());
   const burn3 = supplyBefore3 - supplyAfter3;
   console.log(`    Trader TCGV: +${formatEther(traderTcgvAfter3 - traderTcgvBefore3)}`);
   console.log(`    Burned:      ${formatEther(burn3)} TCGV`);
@@ -444,12 +445,12 @@ async function main() {
   console.log();
 
   console.log("4.1 Sell via PancakeSwap router (swapExactTokensForETHSupportingFeeOnTransferTokens)...");
-  const traderTcgvBefore4 = (await token.read.balanceOf([trader.account.address])) as bigint;
+  const traderTcgvBefore4 = (await token.read.balanceOf([trader.account.address]));
   const sellAmount1 = traderTcgvBefore4 > 0n ? traderTcgvBefore4 / 2n : 0n; // sell half so trader has enough for 4.2
   if (sellAmount1 === 0n) throw new Error("Trader has no TCGV to sell in 4.1");
   await token.write.approve([PANCAKE_ROUTER, sellAmount1], { account: trader.account });
-  const vaultTcgvBefore4 = (await token.read.balanceOf([vaultAddr])) as bigint;
-  const supplyBefore4 = (await token.read.totalSupply()) as bigint;
+  const vaultTcgvBefore4 = (await token.read.balanceOf([vaultAddr]));
+  const supplyBefore4 = (await token.read.totalSupply());
 
   // On BSC fork the router may use a different pair address (pairFor vs getPair), so the
   // pair that receives the transfer can have zero reserves and the balance-delta becomes
@@ -473,9 +474,9 @@ async function main() {
   // Restore pair fee status so 4.2 tests taxed sell via buy router
   await token.write.setExcludedFromFees([pairAddress, false], { account: deployer.account });
 
-  const traderTcgvAfter4 = (await token.read.balanceOf([trader.account.address])) as bigint;
-  const vaultTcgvAfter4 = (await token.read.balanceOf([vaultAddr])) as bigint;
-  const supplyAfter4 = (await token.read.totalSupply()) as bigint;
+  const traderTcgvAfter4 = (await token.read.balanceOf([trader.account.address]));
+  const vaultTcgvAfter4 = (await token.read.balanceOf([vaultAddr]));
+  const supplyAfter4 = (await token.read.totalSupply());
   const sold1 = traderTcgvBefore4 - traderTcgvAfter4;
   const vaultDelta4 = vaultTcgvAfter4 - vaultTcgvBefore4;
   const burn4 = supplyBefore4 - supplyAfter4;
@@ -491,12 +492,12 @@ async function main() {
   console.log();
 
   console.log("4.2 Sell via TCGVaultBuyRouter (TCGV fee → BNB to user)...");
-  const traderTcgvBefore5 = (await token.read.balanceOf([trader.account.address])) as bigint;
+  const traderTcgvBefore5 = (await token.read.balanceOf([trader.account.address]));
   const sellAmount2 = traderTcgvBefore5 > 0n ? traderTcgvBefore5 / 2n : 0n;
   if (sellAmount2 === 0n) throw new Error("Trader has no TCGV to sell in 4.2");
   await token.write.approve([buyRouterAddress, sellAmount2], { account: trader.account });
-  const vaultTcgvBefore5 = (await token.read.balanceOf([vaultAddr])) as bigint;
-  const supplyBefore5 = (await token.read.totalSupply()) as bigint;
+  const vaultTcgvBefore5 = (await token.read.balanceOf([vaultAddr]));
+  const supplyBefore5 = (await token.read.totalSupply());
   const traderBNBBefore5 = await publicClient.getBalance({ address: trader.account.address });
 
   let minBNBOut = 0n;
@@ -518,9 +519,9 @@ async function main() {
     throw new Error("4.2 Sell via TCGVaultBuyRouter reverted");
   }
 
-  const traderTcgvAfter5 = (await token.read.balanceOf([trader.account.address])) as bigint;
-  const vaultTcgvAfter5 = (await token.read.balanceOf([vaultAddr])) as bigint;
-  const supplyAfter5 = (await token.read.totalSupply()) as bigint;
+  const traderTcgvAfter5 = (await token.read.balanceOf([trader.account.address]));
+  const vaultTcgvAfter5 = (await token.read.balanceOf([vaultAddr]));
+  const supplyAfter5 = (await token.read.totalSupply());
   const traderBNBAfter5 = await publicClient.getBalance({ address: trader.account.address });
   const sold2 = traderTcgvBefore5 - traderTcgvAfter5;
   const vaultDelta5 = vaultTcgvAfter5 - vaultTcgvBefore5;

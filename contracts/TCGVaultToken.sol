@@ -21,22 +21,22 @@ error OnlyBuyRouter();
  * @dev Taxe achat 15% (10% Vault, 3% Marketing, 2% burn) + 10% cashback NEXUS. Taxe vente 10%.
  */
 contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
-    // Fee percentages (basis points, 10000 = 100%) — whitepaper §5.1, §5.2
-    uint256 public constant BUY_TAX = 1500; // 15%
-    uint256 public constant SELL_TAX = 1000; // 10%
-    uint256 public constant CASHBACK_RATE = 1000; // 10% cashback in TCG-NEXUS (vente ne génère pas de cashback)
+    // Fee parameters (basis points, 10000 = 100%) — whitepaper defaults; owner-modifiable for pool/router modes
+    uint256 public BUY_TAX = 1500; // 15%
+    uint256 public SELL_TAX = 1000; // 10%
+    uint256 public CASHBACK_RATE = 1000; // 10% cashback in TCG-NEXUS (sells don't generate cashback)
 
-    // Buy tax distribution (in basis points of the 15% buy tax)
-    uint256 public constant BUY_VAULT_SHARE = 6667; // 10% of total = 66.67% of 15%
-    uint256 public constant BUY_MARKETING_SHARE = 2000; // 3% of total = 20% of 15%
-    uint256 public constant BUY_BURN_SHARE = 1333; // 2% of total = 13.33% of 15%
+    // Buy tax distribution (basis points of buy feeAmount)
+    uint256 public BUY_VAULT_SHARE = 6667; // 10% of total = 66.67% of 15%
+    uint256 public BUY_MARKETING_SHARE = 2000; // 3% of total = 20% of 15%
+    uint256 public BUY_BURN_SHARE = 1333; // 2% of total = 13.33% of 15%
 
-    // Sell tax distribution (in basis points of the 10% sell tax)
-    uint256 public constant SELL_VAULT_SHARE = 4000; // 4% of total = 40% of 10%
-    uint256 public constant SELL_AUTOLP_SHARE = 3000; // 3% of total = 30% of 10%
-    uint256 public constant SELL_MARKETING_SHARE = 1000; // 1% of total = 10% of 10%
-    uint256 public constant SELL_COMMUNITY_SHARE = 1000; // 1% of total = 10% of 10%
-    uint256 public constant SELL_BURN_SHARE = 1000; // 1% of total = 10% of 10%
+    // Sell tax distribution (basis points of sell feeAmount)
+    uint256 public SELL_VAULT_SHARE = 4000; // 4% of total = 40% of 10%
+    uint256 public SELL_AUTOLP_SHARE = 3000; // 3% of total = 30% of 10%
+    uint256 public SELL_MARKETING_SHARE = 1000; // 1% of total = 10% of 10%
+    uint256 public SELL_COMMUNITY_SHARE = 1000; // 1% of total = 10% of 10%
+    uint256 public SELL_BURN_SHARE = 1000; // 1% of total = 10% of 10%
 
     // Addresses
     address public pancakeRouter;
@@ -70,6 +70,16 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
     );
     event CashbackDistributed(address recipient, uint256 amount);
     event LiquidityAdded(uint256 tokenAmount, uint256 ethAmount);
+    event BuyFeeParamsUpdated(uint256 buyTaxBp, uint256 vaultShareBp, uint256 marketingShareBp, uint256 burnShareBp);
+    event SellFeeParamsUpdated(
+        uint256 sellTaxBp,
+        uint256 vaultShareBp,
+        uint256 autolpShareBp,
+        uint256 marketingShareBp,
+        uint256 communityShareBp,
+        uint256 burnShareBp
+    );
+    event CashbackRateUpdated(uint256 cashbackRateBp);
 
     /// @notice Whitepaper §4.1: TCG-VAULT Token, TCGV, 1 milliard supply, BNB Chain.
     constructor(
@@ -162,6 +172,66 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
     function setMinAmounts(uint256 _minBuyAmount, uint256 _minSellAmount) external onlyOwner {
         minBuyAmount = _minBuyAmount;
         minSellAmount = _minSellAmount;
+    }
+
+    /**
+     * @notice Update buy fee parameters (pool mode).
+     * @dev Shares are basis points of the buy feeAmount and must sum to 10000.
+     */
+    function setBuyFeeParams(
+        uint256 buyTaxBp,
+        uint256 vaultShareBp,
+        uint256 marketingShareBp,
+        uint256 burnShareBp
+    ) external onlyOwner {
+        if (buyTaxBp > 10000) revert InvalidFeeParams();
+        if (vaultShareBp + marketingShareBp + burnShareBp != 10000) revert InvalidFeeParams();
+        BUY_TAX = buyTaxBp;
+        BUY_VAULT_SHARE = vaultShareBp;
+        BUY_MARKETING_SHARE = marketingShareBp;
+        BUY_BURN_SHARE = burnShareBp;
+        emit BuyFeeParamsUpdated(buyTaxBp, vaultShareBp, marketingShareBp, burnShareBp);
+    }
+
+    /**
+     * @notice Update sell fee parameters (pool mode).
+     * @dev Shares are basis points of the sell feeAmount and must sum to 10000.
+     */
+    function setSellFeeParams(
+        uint256 sellTaxBp,
+        uint256 vaultShareBp,
+        uint256 autolpShareBp,
+        uint256 marketingShareBp,
+        uint256 communityShareBp,
+        uint256 burnShareBp
+    ) external onlyOwner {
+        if (sellTaxBp > 10000) revert InvalidFeeParams();
+        if (vaultShareBp + autolpShareBp + marketingShareBp + communityShareBp + burnShareBp != 10000) {
+            revert InvalidFeeParams();
+        }
+        SELL_TAX = sellTaxBp;
+        SELL_VAULT_SHARE = vaultShareBp;
+        SELL_AUTOLP_SHARE = autolpShareBp;
+        SELL_MARKETING_SHARE = marketingShareBp;
+        SELL_COMMUNITY_SHARE = communityShareBp;
+        SELL_BURN_SHARE = burnShareBp;
+        emit SellFeeParamsUpdated(
+            sellTaxBp,
+            vaultShareBp,
+            autolpShareBp,
+            marketingShareBp,
+            communityShareBp,
+            burnShareBp
+        );
+    }
+
+    /**
+     * @notice Update cashback rate for buy transactions (pool mode).
+     */
+    function setCashbackRate(uint256 cashbackRateBp) external onlyOwner {
+        if (cashbackRateBp > 10000) revert InvalidFeeParams();
+        CASHBACK_RATE = cashbackRateBp;
+        emit CashbackRateUpdated(cashbackRateBp);
     }
 
     /**
@@ -401,4 +471,5 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
         }
     }
 
+    error InvalidFeeParams();
 }

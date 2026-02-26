@@ -16,8 +16,9 @@ import { formatEther, zeroAddress, getContractAddress } from "viem";
  */
 
 async function main() {
-  const [deployer] = await hre.viem.getWalletClients();
-  const publicClient = await hre.viem.getPublicClient();
+  const { viem } = await hre.network.connect();
+  const [deployer] = await viem.getWalletClients();
+  const publicClient = await viem.getPublicClient();
 
   console.log("Deploying contracts with account:", deployer.account.address);
   console.log("Account balance:", formatEther(await publicClient.getBalance({ address: deployer.account.address })));
@@ -32,21 +33,21 @@ async function main() {
   // Deploy TCGVaultToken first (nexusToken set to zero until Nexus is deployed)
   console.log("\n1. Deploying TCGVaultToken...");
   let nonce = await publicClient.getTransactionCount({ address: deployer.account.address });
-  const tokenHash = await hre.viem.deployContract("TCGVaultToken", [
+  await viem.deployContract("TCGVaultToken", [
     pancakeRouter,
     vaultAddress,
     marketingAddress,
     communityAddress,
     zeroAddress, // nexusToken set later via setAddresses
     stablecoin
-  ], { account: deployer.account });
+  ], { client: { wallet: deployer } });
   const tokenAddress = getContractAddress({ from: deployer.account.address, nonce: BigInt(nonce++) });
-  const token = await hre.viem.getContractAt("TCGVaultToken", tokenAddress);
+  const token = await viem.getContractAt("TCGVaultToken", tokenAddress);
   console.log("TCGVaultToken deployed to:", tokenAddress);
 
   // Deploy TCGNexusToken with minter = TCGVaultToken (immutable, no setMinter)
   console.log("\n2. Deploying TCGNexus Token...");
-  const nexusToken = await hre.viem.deployContract("TCGNexusToken", [tokenAddress], { account: deployer.account });
+  await viem.deployContract("TCGNexusToken", [tokenAddress], { client: { wallet: deployer } });
   const nexusTokenAddress = getContractAddress({ from: deployer.account.address, nonce: BigInt(nonce++) });
   console.log("TCGNexus Token deployed to:", nexusTokenAddress);
 
@@ -64,15 +65,15 @@ async function main() {
 
   // Deploy TCGVaultBuyRouter
   console.log("\n4. Deploying TCGVaultBuyRouter...");
-  const buyRouterHash = await hre.viem.deployContract("TCGVaultBuyRouter", [
+  await viem.deployContract("TCGVaultBuyRouter", [
     pancakeRouter,
     tokenAddress,
     vaultAddress,
     marketingAddress,
     communityAddress
-  ], { account: deployer.account });
+  ], { client: { wallet: deployer } });
   const buyRouterAddress = getContractAddress({ from: deployer.account.address, nonce: BigInt(nonce++) });
-  const buyRouter = await hre.viem.getContractAt("TCGVaultBuyRouter", buyRouterAddress);
+  const buyRouter = await viem.getContractAt("TCGVaultBuyRouter", buyRouterAddress);
   console.log("TCGVaultBuyRouter deployed to:", buyRouterAddress);
 
   // Set buy router on token

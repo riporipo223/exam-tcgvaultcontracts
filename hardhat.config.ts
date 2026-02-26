@@ -1,70 +1,108 @@
-import { writeFile } from 'fs/promises';
-import { join } from 'path';
+import { configVariable, defineConfig } from "hardhat/config";
+import hardhatViem from "@nomicfoundation/hardhat-viem";
+import hardhatViemAssertions from "@nomicfoundation/hardhat-viem-assertions";
+import hardhatNodeTestRunner from "@nomicfoundation/hardhat-node-test-runner";
+import hardhatNetworkHelpers from "@nomicfoundation/hardhat-network-helpers";
 
-import { TASK_COMPILE_SOLIDITY_EMIT_ARTIFACTS } from 'hardhat/builtin-tasks/task-names';
-import { subtask, vars, type HardhatUserConfig } from 'hardhat/config';
-import type { SolcUserConfig } from 'hardhat/types';
-import 'hardhat-tracer'
-
-// Uncomment this to verify on Tenderly
-// import * as tdly from "@tenderly/hardhat-tenderly";
-
-// Comment this to verify on Tenderly
-import '@nomicfoundation/hardhat-toolbox-viem';
-import '@nomicfoundation/hardhat-chai-matchers';
-import 'tsconfig-paths/register';
-import '@openzeppelin/hardhat-upgrades';
-
-import networks from './hardhat.network';
-
-const defaultSettings: SolcUserConfig['settings'] = {
-  optimizer: { enabled: true },
-};
-
-type ContractMap = Record<string, { abi: object }>;
-
-subtask(TASK_COMPILE_SOLIDITY_EMIT_ARTIFACTS).setAction(
-  async (args, env, next) => {
-    const output = await next();
-    const { artifacts } = env.config.paths;
-    const promises = Object.entries(args.output.contracts).map(
-      async ([sourceName, contract]) => {
-        const file = join(artifacts, sourceName, 'abi.ts');
-        const { abi } = Object.values(contract as ContractMap)[0];
-        const data = `export const abi = ${JSON.stringify(abi, null, 2)} as const;`;
-        await writeFile(file, data);
-      },
-    );
-    await Promise.all(promises);
-    return output;
-  },
-);
-
-const config: HardhatUserConfig = {
+export default defineConfig({
+  plugins: [
+    hardhatViem,
+    hardhatViemAssertions,
+    hardhatNodeTestRunner,
+    hardhatNetworkHelpers,
+  ],
   solidity: {
-    compilers: [{ version: '0.8.27', settings: { ...defaultSettings, evmVersion: 'cancun'} }, { version: '0.6.6', settings: defaultSettings }, { version: '0.5.16', settings: defaultSettings }, { version: '0.4.18', settings: defaultSettings }],
+    compilers: [
+      { version: "0.8.27", settings: { optimizer: { enabled: true }, evmVersion: "cancun" as const } },
+      { version: "0.6.6", settings: { optimizer: { enabled: true } } },
+      { version: "0.5.16", settings: { optimizer: { enabled: true } } },
+      { version: "0.4.18", settings: { optimizer: { enabled: true } } },
+    ],
   },
-  networks,
-  // comment this below to verify on Tenderly
-  gasReporter: {
-    L2: "arbitrum",
-    etherscan: vars.get('ETHERSCAN_API_KEY'),
-    enabled: vars.has('REPORT_GAS') || vars.has('ETHERSCAN_API_KEY'),
-    coinmarketcap: vars.get('REPORT_GAS'),
-    currency: 'EUR',
+  networks: {
+    hardhat: {
+      type: "edr-simulated",
+      chainType: "l1",
+      forking: process.env.BSC_RPC_URL
+        ? { url: process.env.BSC_RPC_URL, blockNumber: undefined }
+        : undefined,
+    },
+    localhost: {
+      type: "http",
+      chainType: "l1",
+      url: "http://localhost:8545",
+      chainId: 56,
+      accounts: "remote",
+    },
+    mainnet: {
+      type: "http",
+      chainType: "l1",
+      url: configVariable("MAINNET_RPC_URL"),
+      chainId: 1,
+      accounts: [configVariable("TCG_KEY")],
+    },
+    holesky: {
+      type: "http",
+      chainType: "l1",
+      url: configVariable("HOLESKY_RPC_URL"),
+      chainId: 17000,
+      accounts: [configVariable("TCG_KEY")],
+    },
+    sepolia: {
+      type: "http",
+      chainType: "l1",
+      url: configVariable("SEPOLIA_RPC_URL"),
+      chainId: 11155111,
+      gasPrice: "auto",
+      accounts: [configVariable("TCG_KEY")],
+    },
+    gnosis: {
+      type: "http",
+      chainType: "l1",
+      url: configVariable("GNOSIS_RPC_URL"),
+      chainId: 100,
+      gasPrice: "auto",
+      accounts: [configVariable("TCG_KEY")],
+    },
+    sokol: {
+      type: "http",
+      chainType: "l1",
+      url: configVariable("SOKOL_RPC_URL"),
+      chainId: 77,
+      gasPrice: "auto",
+      accounts: [configVariable("TCG_KEY")],
+    },
+    bsc: {
+      type: "http",
+      chainType: "l1",
+      url: configVariable("BSC_RPC_URL"),
+      chainId: 56,
+      gasPrice: "auto",
+      accounts: [configVariable("TCG_KEY")],
+    },
+    bsctest: {
+      type: "http",
+      chainType: "l1",
+      url: configVariable("BSCTEST_RPC_URL"),
+      chainId: 97,
+      gasPrice: "auto",
+      accounts: [configVariable("TCG_KEY")],
+    },
+    arbitrum: {
+      type: "http",
+      chainType: "l1",
+      url: configVariable("ARBITRUM_RPC_URL"),
+      chainId: 42161,
+      gasPrice: "auto",
+      accounts: [configVariable("TCG_KEY")],
+    },
+    arbitrumsepolia: {
+      type: "http",
+      chainType: "l1",
+      url: configVariable("ARBITRUM_SEPOLIA_RPC_URL"),
+      chainId: 421614,
+      gasPrice: "auto",
+      accounts: [configVariable("TCG_KEY")],
+    },
   },
-  etherscan: {
-    apiKey: vars.get('ETHERSCAN_API_KEY'),
-    customChains: [
-      {
-        network: "arbitrumsepolia",
-        chainId: 421614,
-        urls: {
-          apiURL: "https://api.etherscan.io/v2/api?chainid=421614&apikey=" + vars.get('ETHERSCAN_API_KEY'),
-          browserURL: "https://sepolia.arbiscan.io"
-        }
-      },
-    ]
-  },
-};
-export default config;
+});
