@@ -9,7 +9,7 @@ Token A — le Moteur économique (whitepaper §4.1). BNB Chain, 1 milliard supp
 
 **Features (whitepaper §5.1, §5.2):**
 - **Direct pair (PancakeSwap):** Buy tax 15% in TCGV (10% Vault, 3% Marketing, 2% burn) + 10% NEXUS cashback. Sell tax 10% in TCGV.
-- **Router path (TCGVaultBuyRouter):** Buy fee 15% **in BNB** (vault, marketing, burn); user gets full TCGV from swap + 10% NEXUS cashback.
+- **Router path (TCGVaultBuyRouter):** Buy fee 13% **in BNB** (10% vault, 3% marketing); 2% of TCGV received is burned; user gets rest + 10% NEXUS cashback.
 - Auto-LP and auto-burn on sells.
 
 ### TCGNexusToken.sol (NEXUS)
@@ -21,7 +21,7 @@ Jeton de Cœur — gouvernance et appartenance (whitepaper §5.5).
 - Obtained via 10% cashback on TCGV purchase; owner can mint for presale/initial distribution
 
 ### TCGVaultBuyRouter.sol
-**Buy TCGV with BNB through this contract: fee is charged in BNB.** User sends BNB; 15% is taken in BNB (vault, marketing, burn); the rest is swapped for TCGV via PancakeSwap. User receives full TCGV from the swap + 10% NEXUS cashback. Uses transient storage so the pair→router TCGV transfer is not taxed (fee already taken in BNB).
+**Buy TCGV with BNB through this contract: fee is charged in BNB.** User sends BNB; 13% is taken in BNB (10% vault, 3% marketing); the rest is swapped for TCGV via PancakeSwap. 2% of TCGV received is burned. User receives the remaining TCGV + 10% NEXUS cashback. Uses transient storage so the pair→router TCGV transfer is not taxed (fee already taken in BNB).
 
 ### TCGVaultLiquidityWrapper.sol
 Use for **adding/removing liquidity** so TCGV does **not** charge fees on those transfers (whitepaper: no fees on LP supply/remove). Sets transient storage (EIP-1153) before calling the DEX router; TCGVaultToken skips fees when this slot is set. Requires **Cancun** (or later) hardfork for `tstore`/`tload`.
@@ -71,15 +71,13 @@ The whitepaper §7 describes **Founder Edition** NFTs (500) and **Édition basiq
    );
    token.setBuyRouter(address(buyRouter));
    ```
-   Users who buy via `buyRouter.buyTCGVWithBNB(amountOutMin, deadline){ value: bnb }` pay 15% fee in BNB and receive full TCGV + 10% NEXUS cashback.
+   Users who buy via `buyRouter.buyTCGVWithBNB(amountOutMin, deadline){ value: bnb }` pay 13% fee in BNB (10% vault, 3% marketing), 2% of TCGV received is burned, and receive the rest + 10% NEXUS cashback.
 
 ## Fee Structure
 
-### Buy Tax (15%)
-- **10%** → Vault Allocation (converted to stablecoin for physical collection)
-- **3%** → Marketing & Development
-- **2%** → Auto-burn
-- **Bonus:** 10% cashback in TCGNEXUS tokens
+### Buy Tax
+- **Direct (PancakeSwap):** 15% in TCGV (10% vault, 3% marketing, 2% burn) + 10% NEXUS cashback.
+- **BuyRouter (BNB path):** 13% in BNB (10% vault, 3% marketing), 2% of TCGV received burned, + 10% NEXUS cashback.
 
 ### Sell Tax (10%)
 - **4%** → Vault Consolidation

@@ -5,11 +5,12 @@ const networks: NetworksUserConfig = {};
 
 networks.hardhat = {
   hardfork: 'cancun', // EIP-1153 tstore/tload for TCGVaultToken liquidity exemption
-  // Uncomment below to fork BSC mainnet:
-  // forking: {
-  //   url: vars.get('BSC_RPC_URL') || 'https://bsc-dataseed.binance.org/',
-  //   blockNumber: undefined, // Use latest block, or specify a block number
-  // },
+  // Fork BSC for testOnBSCFork.ts: set BSC_RPC_URL (archive node recommended to avoid "missing trie node")
+  // Then: yarn hardhat run scripts/testOnBSCFork.ts --network hardhat
+  // Or: yarn hardhat node (with BSC_RPC_URL set), then in another terminal: ... --network localhost
+  ...(vars.has('BSC_RPC_URL') && {
+    forking: { url: vars.get('BSC_RPC_URL'), blockNumber: undefined },
+  }),
 };
 
 networks.localhost = {

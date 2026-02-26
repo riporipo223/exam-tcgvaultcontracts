@@ -5,31 +5,8 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-
-interface IPancakeRouter {
-    function factory() external pure returns (address);
-    function WETH() external pure returns (address);
-    function addLiquidityETH(
-        address token,
-        uint256 amountTokenDesired,
-        uint256 amountTokenMin,
-        uint256 amountETHMin,
-        address to,
-        uint256 deadline
-    ) external payable returns (uint256 amountToken, uint256 amountETH, uint256 liquidity);
-}
-
-interface IPancakeFactory {
-    function getPair(address tokenA, address tokenB) external view returns (address pair);
-}
-
-interface IPancakePair {
-    function sync() external;
-}
-
-interface ITCGNexusToken {
-    function mintCashback(address recipient, uint256 amount) external;
-}
+import "./interfaces/IPancakeV2.sol";
+import "./interfaces/ITCGNexusToken.sol";
 
 /// @notice Pair address cannot be zero.
 error PairZeroAddress();
@@ -209,6 +186,16 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
         emit CashbackDistributed(recipient, cashbackAmount);
     }
 
+    /**
+     * @notice Burn TCGV from caller. Only callable by buyRouter.
+     * @dev Burns from msg.sender (router) so router does not need to transfer first — saves gas.
+     */
+    function burn(uint256 amount) external {
+        if (msg.sender != buyRouter) revert OnlyBuyRouter();
+        if (amount == 0) return;
+        _burn(msg.sender, amount);
+    }
+
     /// @dev Transient storage slot for liquidity wrapper: when set, add/remove liquidity transfers are exempt from fees (EIP-1153).
     uint256 private constant FEE_EXEMPT_SLOT = 0;
 
@@ -267,7 +254,7 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
         // Distribute buy fees
         if (feeAmount > 0) {
             super._update(from, address(this), feeAmount);
-            _distributeBuyFees(feeAmount, to);
+            _distributeBuyFees(feeAmount);
         }
 
         // Distribute cashback
@@ -296,7 +283,7 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
     /**
      * @notice Distribute buy fees
      */
-    function _distributeBuyFees(uint256 totalFee, address buyer) private {
+    function _distributeBuyFees(uint256 totalFee) private {
         uint256 vaultAmount = (totalFee * BUY_VAULT_SHARE) / 10000;
         uint256 marketingAmount = (totalFee * BUY_MARKETING_SHARE) / 10000;
         uint256 burnAmount = (totalFee * BUY_BURN_SHARE) / 10000;

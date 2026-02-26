@@ -10,7 +10,6 @@ import 'hardhat-tracer'
 // import * as tdly from "@tenderly/hardhat-tenderly";
 
 // Comment this to verify on Tenderly
-import '@nomicfoundation/hardhat-ethers';
 import '@nomicfoundation/hardhat-toolbox-viem';
 import '@nomicfoundation/hardhat-chai-matchers';
 import 'tsconfig-paths/register';
@@ -20,7 +19,6 @@ import networks from './hardhat.network';
 
 const defaultSettings: SolcUserConfig['settings'] = {
   optimizer: { enabled: true },
-  evmVersion: 'cancun', // EIP-1153 tstore/tload for liquidity exemption and buy router
 };
 
 type ContractMap = Record<string, { abi: object }>;
@@ -44,7 +42,7 @@ subtask(TASK_COMPILE_SOLIDITY_EMIT_ARTIFACTS).setAction(
 
 const config: HardhatUserConfig = {
   solidity: {
-    compilers: [{ version: '0.8.27', settings: defaultSettings }],
+    compilers: [{ version: '0.8.27', settings: { ...defaultSettings, evmVersion: 'cancun'} }, { version: '0.6.6', settings: defaultSettings }, { version: '0.5.16', settings: defaultSettings }, { version: '0.4.18', settings: defaultSettings }],
   },
   networks,
   // comment this below to verify on Tenderly

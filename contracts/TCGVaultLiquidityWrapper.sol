@@ -2,32 +2,14 @@
 pragma solidity ^0.8.27;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "./interfaces/IRouter.sol";
 
 /// @notice ETH refund to caller failed.
 error RefundETHFailed();
 /// @notice Only the router may send ETH (refund from addLiquidity); use addLiquidityETH to add liquidity.
 error OnlyRouterCanSendETH();
 
-/// @notice Router interface for add/remove liquidity (Uniswap V2 / PancakeSwap compatible).
-interface IRouter {
-    function addLiquidityETH(
-        address token,
-        uint256 amountTokenDesired,
-        uint256 amountTokenMin,
-        uint256 amountETHMin,
-        address to,
-        uint256 deadline
-    ) external payable returns (uint256 amountToken, uint256 amountETH, uint256 liquidity);
 
-    function removeLiquidityETH(
-        address token,
-        uint256 liquidity,
-        uint256 amountTokenMin,
-        uint256 amountETHMin,
-        address to,
-        uint256 deadline
-    ) external returns (uint256 amountToken, uint256 amountETH);
-}
 
 /**
  * @title TCGVaultLiquidityWrapper

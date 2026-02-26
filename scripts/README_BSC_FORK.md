@@ -50,7 +50,7 @@ npx hardhat run scripts/testOnBSCFork.ts --network hardhat
 
 4. **Tests Trading Scenarios:**
    - **Buy via PancakeSwap Router:** Regular swap with TCGV fees
-   - **Buy via TCGVaultBuyRouter:** BNB fee path (15% fee in BNB, then swap)
+   - **Buy via TCGVaultBuyRouter:** BNB fee path (13% fee in BNB = 10% vault + 3% marketing, then swap; 2% of TCGV burned)
    - **Direct Pair Swap:** Non-router path (direct pair interaction)
    - **Sell via PancakeSwap Router:** Sell TCGV for BNB with sell fees
 
