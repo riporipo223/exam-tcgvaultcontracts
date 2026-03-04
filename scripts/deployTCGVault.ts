@@ -3,10 +3,16 @@ import { formatEther, zeroAddress, getContractAddress } from "viem";
 
 /**
  * Deployment script for TCG Vault Token contracts
- * 
+ *
+ * Initial allocation (whitepaper §5): 60% Presale, 20% Liquidité, 4% Vesting & Équipe,
+ * 5% Opérationnel & Marketing (immédiat), 11% Opérationnel & Marketing (vesting).
+ * Post-deploy: transfer 60% (600M TCGV) to InitialLaunch for presale; allocate 20% to LP, 4% to team vesting, 16% to ops/marketing.
+ *
+ * NEXUS cashback (whitepaper §6): 30% during presale (Vagues 1 et 2), 10% after. Set token.setPresaleFinalizer(launchContract); launch contract calls token.finalizePresale() when it finalizes (120h countdown or hard cap).
+ *
  * Usage:
  *   yarn hardhat run scripts/deployTCGVault.ts --network <network>
- * 
+ *
  * Environment variables needed:
  *   - PANCAKE_ROUTER: PancakeSwap router address
  *   - VAULT_ADDRESS: Vault address for fee collection
@@ -28,7 +34,6 @@ async function main() {
   const vaultAddress = (process.env.VAULT_ADDRESS || deployer.account.address) as `0x${string}`; // Replace with actual vault
   const marketingAddress = (process.env.MARKETING_ADDRESS || deployer.account.address) as `0x${string}`; // Replace with actual marketing
   const communityAddress = (process.env.COMMUNITY_ADDRESS || deployer.account.address) as `0x${string}`; // Replace with actual community
-  const stablecoin = (process.env.STABLECOIN_ADDRESS || "0x55d398326f99059fF775485246999027B3197955") as `0x${string}`; // USDT BSC
 
   // Deploy TCGVaultToken first (nexusToken set to zero until Nexus is deployed)
   console.log("\n1. Deploying TCGVaultToken...");
@@ -39,7 +44,6 @@ async function main() {
     marketingAddress,
     communityAddress,
     zeroAddress, // nexusToken set later via setAddresses
-    stablecoin
   ], { client: { wallet: deployer } });
   const tokenAddress = getContractAddress({ from: deployer.account.address, nonce: BigInt(nonce++) });
   const token = await viem.getContractAt("TCGVaultToken", tokenAddress);
@@ -58,7 +62,6 @@ async function main() {
     marketingAddress,
     communityAddress,
     nexusTokenAddress,
-    stablecoin
   ], { account: deployer.account });
   await publicClient.waitForTransactionReceipt({ hash: setAddrHash });
   console.log("Nexus token set successfully");
@@ -90,8 +93,7 @@ async function main() {
   console.log("Vault Address:", vaultAddress);
   console.log("Marketing Address:", marketingAddress);
   console.log("Community Address:", communityAddress);
-  console.log("Stablecoin:", stablecoin);
-  
+
   console.log("\n=== Next Steps ===");
   console.log("1. Add liquidity to PancakeSwap");
   console.log("2. Call token.setPair(pairAddress) to register the pair");

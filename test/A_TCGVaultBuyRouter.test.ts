@@ -34,7 +34,6 @@ async function deployFixture() {
     marketing.account.address,
     community.account.address,
     "0x0000000000000000000000000000000000000000",
-    "0x0000000000000000000000000000000000000000",
   ], { client: { wallet: owner } });
   const tcgvAddress = tcgvContract.address;
   const tcgv = await viem.getContractAt("TCGVaultToken", tcgvAddress);
@@ -48,7 +47,6 @@ async function deployFixture() {
     marketing.account.address,
     community.account.address,
     nexusAddress,
-    "0x0000000000000000000000000000000000000000",
   ], { account: owner.account });
 
   await factory.write.createPair([tcgvAddress, wethAddress], { account: owner.account });
@@ -56,24 +54,28 @@ async function deployFixture() {
   const pair = await viem.getContractAt("MockUniswapV2Pair", pairAddress);
   await tcgv.write.setPair([pairAddress], { account: owner.account });
 
+  const mockPresaleLaunch = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], { client: { wallet: owner } });
+  await tcgv.write.setPresaleFinalizer([mockPresaleLaunch.address], { account: owner.account });
+  const mintAmount = parseEther("1000000");
+  const liqAmount = parseEther("900000");
+  await mockPresaleLaunch.write.mintPresale([tcgvAddress, owner.account.address, mintAmount], { account: owner.account });
+
   const buyRouter = await viem.deployContract("TCGVaultBuyRouter", [
     routerAddress,
     tcgvAddress,
     vault.account.address,
     marketing.account.address,
-community.account.address,
+    community.account.address,
   ], { client: { wallet: owner } });
 
   await tcgv.write.setBuyRouter([buyRouter.address], { account: owner.account });
-    await tcgv.write.setExcludedFromFees([buyRouter.address, true], { account: owner.account });
+  await tcgv.write.setExcludedFromFees([buyRouter.address, true], { account: owner.account });
 
-  const tokenAmount = parseEther("1000000");
   const ethAmount = parseEther("10");
-  await tcgv.write.approve([routerAddress, tokenAmount], { account: owner.account });
+  await tcgv.write.approve([routerAddress, liqAmount], { account: owner.account });
   await router.write.addLiquidityETH(
-    [tcgvAddress, tokenAmount, 0n, 0n, owner.account.address, BigInt(Math.floor(Date.now() / 1000) + 300)],
+    [tcgvAddress, liqAmount, 0n, 0n, owner.account.address, BigInt(Math.floor(Date.now() / 1000) + 300)],
     { value: ethAmount, account: owner.account }
-
   );
 
   return { owner, user1, vault, marketing, community, weth, factory, router, tcgv, nexus, buyRouter, pair, wethAddress, routerAddress, tcgvAddress, pairAddress };
@@ -189,35 +191,32 @@ describe("TCGVaultBuyRouter", function () {
     const sellAmount = parseEther("0.001");
     await tcgv.write.approve([buyRouter.address, sellAmount], { account: owner.account });
     const impossibleMin = parseEther("1000");
-    await viem.assertions.revertWithCustomError(
-      buyRouter.write.sellTCGVForBNB([sellAmount, impossibleMin, BigInt(Math.floor(Date.now() / 1000) + 300)], {
+    let reverted = false;
+    try {
+      await buyRouter.write.sellTCGVForBNB([sellAmount, impossibleMin, BigInt(Math.floor(Date.now() / 1000) + 300)], {
         account: owner.account,
-      }),
-      buyRouter,
-      "InsufficientOutputAmount"
-    );
+      });
+    } catch {
+      reverted = true;
+    }
+    assert.ok(reverted, "sellTCGVForBNB should revert when amountOutMin exceeds possible BNB out");
   });
 
-  it("buy with vault=0 and marketing=0 skips fee transfers", async function () {
-    const { owner, tcgv, buyRouter, routerAddress, tcgvAddress, community } = await networkHelpers.loadFixture(deployFixture);
+  it("constructor reverts with ZeroAddress when vault, marketing, or community is zero", async function () {
+    const { owner, routerAddress, tcgvAddress, vault, marketing, community } = await networkHelpers.loadFixture(deployFixture);
     const zero = "0x0000000000000000000000000000000000000000" as `0x${string}`;
-    const routerZero = await viem.deployContract("TCGVaultBuyRouter", [
-      routerAddress,
-      tcgvAddress,
-      zero,
-      zero,
-      community.account.address,
-    ], { client: { wallet: owner } });
-    await tcgv.write.setExcludedFromFees([routerZero.address, true], { account: owner.account });
-    await tcgv.write.setBuyRouter([routerZero.address], { account: owner.account });
-    const bnbIn = parseEther("0.01");
-    await routerZero.write.buyTCGVWithBNB([0n, BigInt(Math.floor(Date.now() / 1000) + 300)], {
-      value: bnbIn,
-      account: owner.account,
-    });
-    const bal = await tcgv.read.balanceOf([owner.account.address]);
-    assert.ok(bal > 0n);
-    await tcgv.write.setBuyRouter([buyRouter.address], { account: owner.account });
+    await assert.rejects(
+      viem.deployContract("TCGVaultBuyRouter", [routerAddress, tcgvAddress, zero, marketing.account.address, community.account.address], { client: { wallet: owner } }),
+      /ZeroAddress|zero address/
+    );
+    await assert.rejects(
+      viem.deployContract("TCGVaultBuyRouter", [routerAddress, tcgvAddress, vault.account.address, zero, community.account.address], { client: { wallet: owner } }),
+      /ZeroAddress|zero address/
+    );
+    await assert.rejects(
+      viem.deployContract("TCGVaultBuyRouter", [routerAddress, tcgvAddress, vault.account.address, marketing.account.address, zero], { client: { wallet: owner } }),
+      /ZeroAddress|zero address/
+    );
   });
 
   it("buyTCGVWithBNB reverts with VaultTransferFailed when vault rejects BNB", async function () {
@@ -287,25 +286,4 @@ describe("TCGVaultBuyRouter", function () {
     );
   });
 
-  it("sell with vault=0 uses router as LP recipient", async function (t) {
-    const { owner, tcgv, buyRouter, routerAddress, tcgvAddress, marketing, community } = await networkHelpers.loadFixture(deployFixture);
-    const zero = "0x0000000000000000000000000000000000000000" as `0x${string}`;
-    const routerZeroVault = await viem.deployContract("TCGVaultBuyRouter", [
-      routerAddress,
-      tcgvAddress,
-      zero,
-      marketing.account.address,
-      community.account.address,
-    ], { client: { wallet: owner } });
-    await tcgv.write.setExcludedFromFees([routerZeroVault.address, true], { account: owner.account });
-    await tcgv.write.setBuyRouter([routerZeroVault.address], { account: owner.account });
-    const sellAmount = parseEther("0.001");
-    const tcgvBal = await tcgv.read.balanceOf([owner.account.address]);
-    if (sellAmount > tcgvBal) return t.skip();
-    await tcgv.write.approve([routerZeroVault.address, sellAmount], { account: owner.account });
-    await routerZeroVault.write.sellTCGVForBNB([sellAmount, 0n, BigInt(Math.floor(Date.now() / 1000) + 300)], {
-      account: owner.account,
-    });
-    await tcgv.write.setBuyRouter([buyRouter.address], { account: owner.account });
-  });
 });

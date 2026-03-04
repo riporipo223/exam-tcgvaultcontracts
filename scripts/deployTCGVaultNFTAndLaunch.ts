@@ -1,5 +1,7 @@
 /**
- * Deploy NFT + Staking + Initial Launch ecosystem (whitepaper §6, §7).
+ * Deploy NFT + Staking + Initial Launch ecosystem (whitepaper §6, §7, §8).
+ *
+ * Initial allocation (whitepaper §5): 60% Presale → transfer 600M TCGV to InitialLaunch for vesting claims.
  *
  * Prerequisites: TCGV, USDC, and TCGNexusToken addresses.
  *
@@ -10,7 +12,7 @@
  * 4. TCGVaultFounderNFT(usdc, nexusToken, treasury)
  * 5. TCGVaultInitialLaunch(tcgv, usdc, founderNFT, nexusToken, treasury)
  * 6. nexus.setPresaleMinter(founderNFT), nexus.setPresaleMinter(initialLaunch)
- * 7. Transfer 600M TCGV to InitialLaunch for vesting claims
+ * 7. Transfer 600M TCGV (60% of supply) to InitialLaunch for presale vesting claims
  *
  * Usage:
  *   TCGV_ADDRESS=... USDC_ADDRESS=... NEXUS_ADDRESS=... yarn hardhat run scripts/deployTCGVaultNFTAndLaunch.ts --network <network>

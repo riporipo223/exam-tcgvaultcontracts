@@ -11,16 +11,29 @@ import "./interfaces/ITCGVaultStakingVault.sol";
  *   Minted automatically when user has >= minStake (e.g. ~25$ TCGV) staked; burned when stake drops below (via staking vault).
  */
 contract TCGVaultBasicNFT is ERC721, Ownable {
-    ITCGVaultStakingVault public stakingVault;
-    uint256 public nextTokenId;
+    ITCGVaultStakingVault private _stakingVault;
+    uint256 private _nextTokenId;
     /// @notice Base URI for tokenURI (set by owner; used by explorers/marketplaces).
     string private _baseTokenURI;
 
     /// @dev One Basic NFT per wallet (whitepaper: "mint gratuit" + staking requirement).
-    mapping(address => uint256) public ownerToTokenId;
+    mapping(address => uint256) private _ownerToTokenId;
+
+    // External getters (private/external pattern)
+    function stakingVault() external view returns (address) {
+        return address(_stakingVault);
+    }
+
+    function nextTokenId() external view returns (uint256) {
+        return _nextTokenId;
+    }
+
+    function ownerToTokenId(address owner) external view returns (uint256) {
+        return _ownerToTokenId[owner];
+    }
 
     constructor(address stakingVault_) ERC721("TCG-VAULT Basic", "TCGVB") Ownable(msg.sender) {
-        stakingVault = ITCGVaultStakingVault(stakingVault_);
+        _stakingVault = ITCGVaultStakingVault(stakingVault_);
     }
 
     function setBaseURI(string calldata baseURI_) external onlyOwner {
@@ -32,39 +45,39 @@ contract TCGVaultBasicNFT is ERC721, Ownable {
     }
 
     function setStakingVault(address stakingVault_) external onlyOwner {
-        stakingVault = ITCGVaultStakingVault(stakingVault_);
+        _stakingVault = ITCGVaultStakingVault(stakingVault_);
     }
 
     /// @notice Total number of Basic NFTs ever minted (sold). Used by Initial Launch for tracking.
     function totalSupply() external view returns (uint256) {
-        return nextTokenId;
+        return _nextTokenId;
     }
 
     /// @notice Minimum stake (shares) required to hold a Basic NFT. Set to represent ~25 USD in TCGV at launch price.
     function minStakeRequired() public view returns (uint256) {
-        return stakingVault.minStakeForBasicNFT();
+        return _stakingVault.minStakeForBasicNFT();
     }
 
     /// @notice Called by staking vault when a user's stake reaches or exceeds minimum. Mints one Basic NFT for the account if eligible.
     /// @dev Access: only stakingVault. Idempotent: no-op if account already has a Basic NFT or stake is below minimum.
     function mintFor(address account) external {
-        if (msg.sender != address(stakingVault)) revert OnlyStakingVault();
-        if (stakingVault.balanceOf(account) < minStakeRequired()) return; // not enough stake, no-op
-        if (ownerToTokenId[account] != 0) return; // already has Basic NFT, no-op
-        uint256 tokenId = nextTokenId++;
-        ownerToTokenId[account] = tokenId + 1; // store 1-based so tokenId 0 is stored as 1
+        if (msg.sender != address(_stakingVault)) revert OnlyStakingVault();
+        if (_stakingVault.balanceOf(account) < minStakeRequired()) return; // not enough stake, no-op
+        if (_ownerToTokenId[account] != 0) return; // already has Basic NFT, no-op
+        uint256 tokenId = _nextTokenId++;
+        _ownerToTokenId[account] = tokenId + 1; // store 1-based so tokenId 0 is stored as 1
         _safeMint(account, tokenId);
     }
 
     /// @notice Called by staking vault when user's stake drops below minimum. Burns all Basic NFTs held by owner.
     /// @dev Access: only stakingVault (set via setStakingVault by owner). ownerToTokenId stores tokenId + 1 (1-based).
     function burnAllFor(address owner) external {
-        if (msg.sender != address(stakingVault)) revert OnlyStakingVault();
-        uint256 idPlusOne = ownerToTokenId[owner];
+        if (msg.sender != address(_stakingVault)) revert OnlyStakingVault();
+        uint256 idPlusOne = _ownerToTokenId[owner];
         if (idPlusOne != 0) {
             uint256 tokenId = idPlusOne - 1;
             if (_ownerOf(tokenId) == owner) {
-                ownerToTokenId[owner] = 0;
+                _ownerToTokenId[owner] = 0;
                 _burn(tokenId);
             }
         }
@@ -79,8 +92,8 @@ contract TCGVaultBasicNFT is ERC721, Ownable {
     {
         address from = _ownerOf(tokenId);
         if (from != address(0) && to != address(0)) revert Soulbound();
-        if (from != address(0)) ownerToTokenId[from] = 0;
-        if (to != address(0)) ownerToTokenId[to] = tokenId + 1; // 1-based so 0 = not minted
+        if (from != address(0)) _ownerToTokenId[from] = 0;
+        if (to != address(0)) _ownerToTokenId[to] = tokenId + 1; // 1-based so 0 = not minted
         return super._update(to, tokenId, auth);
     }
 

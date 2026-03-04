@@ -1,3 +1,8 @@
+/**
+ * Coverage-only config: single Solidity 0.8.27 compiler so Hardhat's coverage
+ * library compiles correctly. Use with: yarn coverage (which excludes fork-only
+ * contracts before running).
+ */
 import { configVariable, defineConfig } from "hardhat/config";
 import hardhatViem from "@nomicfoundation/hardhat-viem";
 import hardhatViemAssertions from "@nomicfoundation/hardhat-viem-assertions";
@@ -5,7 +10,6 @@ import hardhatNodeTestRunner from "@nomicfoundation/hardhat-node-test-runner";
 import hardhatNetworkHelpers from "@nomicfoundation/hardhat-network-helpers";
 
 export default defineConfig({
-  // Coverage: run `yarn coverage`. Uses hardhat.coverage.config.ts (single compiler); fork-only contracts are temporarily excluded. Reports in coverage/ (lcov, HTML).
   plugins: [
     hardhatViem,
     hardhatViemAssertions,
@@ -13,20 +17,13 @@ export default defineConfig({
     hardhatNetworkHelpers,
   ],
   solidity: {
-    compilers: [
-      { version: "0.8.27", settings: { optimizer: { enabled: true }, evmVersion: "cancun" as const } },
-      { version: "0.6.6", settings: { optimizer: { enabled: true } } },
-      { version: "0.5.16", settings: { optimizer: { enabled: true } } },
-      { version: "0.4.18", settings: { optimizer: { enabled: true } } },
-    ],
+    version: "0.8.27",
+    settings: { optimizer: { enabled: true }, evmVersion: "cancun" as const },
   },
   networks: {
     hardhat: {
       type: "edr-simulated",
       chainType: "l1",
-      forking: process.env.BSC_RPC_URL
-        ? { url: process.env.BSC_RPC_URL, blockNumber: undefined }
-        : undefined,
     },
     localhost: {
       type: "http",

@@ -30,35 +30,39 @@ error InsufficientOutputAmount();
 error Expired();
 /// @notice BNB transfer to user failed.
 error UserTransferFailed();
+/// @notice Router retained BNB or sweep failed.
+error SweepFailed();
+/// @notice Vault, marketing, and community must be non-zero (immutable).
+error ZeroAddress();
 
 /**
  * @title TCGVaultBuyRouter
- * @notice Buy TCGV with BNB through this contract: fee is taken in BNB (13%), then remaining BNB is swapped for TCGV. 2% of TCGV received is burned. User receives rest + 10% NEXUS cashback.
- * @dev This contract is excluded from fees in TCGVaultToken, so pair→router and router→user transfers are not taxed. Fees are already taken in BNB.
+ * @notice Buy TCGV with BNB: BNB fee 13% (10% vault, 3% marketing), then swap for TCGV; 2% of TCGV burned. User receives rest + NEXUS cashback (30% presale, 10% standard — whitepaper §6).
+ * @dev This contract is excluded from fees in TCGVaultToken. Cashback rate is determined by TCGVaultToken (presaleActive).
  */
 contract TCGVaultBuyRouter is Ownable {
     // Fee params (basis points) — defaults reflect current behavior, but are owner-modifiable.
     // Buy: BNB fee split + TCGV burn on output
-    uint256 public buyVaultBp = 1000; // 10% of BNB
-    uint256 public buyMarketingBp = 300; // 3% of BNB
-    uint256 public buyCommunityBp = 0; // 0% by default
-    uint256 public buyTcgvBurnBp = 200; // 2% of TCGV received is burned
+    uint256 private _buyVaultBp = 1000; // 10% of BNB
+    uint256 private _buyMarketingBp = 300; // 3% of BNB
+    uint256 private _buyCommunityBp = 0; // 0% by default
+    uint256 private _buyTcgvBurnBp = 200; // 2% of TCGV received is burned
 
     // Sell: fee in TCGV + distribution
-    uint256 public sellTaxBp = 1000; // 10%
-    uint256 public sellVaultShareBp = 4000; // basis points of totalFee
-    uint256 public sellAutolpShareBp = 3000;
-    uint256 public sellMarketingShareBp = 1000;
-    uint256 public sellCommunityShareBp = 1000;
-    uint256 public sellBurnShareBp = 1000;
+    uint256 private _sellTaxBp = 1000; // 10%
+    uint256 private _sellVaultShareBp = 4000; // basis points of totalFee
+    uint256 private _sellAutolpShareBp = 3000;
+    uint256 private _sellMarketingShareBp = 1000;
+    uint256 private _sellCommunityShareBp = 1000;
+    uint256 private _sellBurnShareBp = 1000;
 
-    address public immutable router;
-    address public immutable factory;
-    ITCGVaultToken public immutable tcgv;
-    address public immutable weth;
-    address public immutable vault;
-    address public immutable marketing;
-    address public immutable community;
+    address private immutable _router;
+    address private immutable _factory;
+    ITCGVaultToken private immutable _tcgv;
+    address private immutable _weth;
+    address private immutable _vault;
+    address private immutable _marketing;
+    address private immutable _community;
 
     event BuyWithBNB(address indexed buyer, uint256 bnbIn, uint256 feeBNB, uint256 tcgvOut);
     event SellTCGVForBNB(address indexed seller, uint256 tcgvIn, uint256 feeTCGV, uint256 bnbOut);
@@ -80,20 +84,42 @@ contract TCGVaultBuyRouter is Ownable {
         uint256 burnAmount;
     }
 
+    // External getters (private/external pattern)
+    function router() external view returns (address) { return _router; }
+    function factory() external view returns (address) { return _factory; }
+    function tcgv() external view returns (address) { return address(_tcgv); }
+    function weth() external view returns (address) { return _weth; }
+    function vault() external view returns (address) { return _vault; }
+    function marketing() external view returns (address) { return _marketing; }
+    function community() external view returns (address) { return _community; }
+
+    function buyVaultBp() external view returns (uint256) { return _buyVaultBp; }
+    function buyMarketingBp() external view returns (uint256) { return _buyMarketingBp; }
+    function buyCommunityBp() external view returns (uint256) { return _buyCommunityBp; }
+    function buyTcgvBurnBp() external view returns (uint256) { return _buyTcgvBurnBp; }
+
+    function sellTaxBp() external view returns (uint256) { return _sellTaxBp; }
+    function sellVaultShareBp() external view returns (uint256) { return _sellVaultShareBp; }
+    function sellAutolpShareBp() external view returns (uint256) { return _sellAutolpShareBp; }
+    function sellMarketingShareBp() external view returns (uint256) { return _sellMarketingShareBp; }
+    function sellCommunityShareBp() external view returns (uint256) { return _sellCommunityShareBp; }
+    function sellBurnShareBp() external view returns (uint256) { return _sellBurnShareBp; }
+
     constructor(
-        address _router,
-        ITCGVaultToken _tcgv,
-        address _vault,
-        address _marketing,
-        address _community
+        address router_,
+        ITCGVaultToken tcgv_,
+        address vault_,
+        address marketing_,
+        address community_
     ) Ownable(msg.sender) {
-        router = _router;
-        factory = IPancakeRouter02(_router).factory();
-        tcgv = _tcgv;
-        weth = IPancakeRouter02(_router).WETH();
-        vault = _vault;
-        marketing = _marketing;
-        community = _community;
+        if (vault_ == address(0) || marketing_ == address(0) || community_ == address(0)) revert ZeroAddress();
+        _router = router_;
+        _factory = IPancakeRouter02(router_).factory();
+        _tcgv = tcgv_;
+        _weth = IPancakeRouter02(router_).WETH();
+        _vault = vault_;
+        _marketing = marketing_;
+        _community = community_;
     }
 
     /**
@@ -108,10 +134,10 @@ contract TCGVaultBuyRouter is Ownable {
     ) external onlyOwner {
         if (vaultBp + marketingBp + communityBp > 10000) revert InvalidFeeParams();
         if (tcgvBurnBp > 10000) revert InvalidFeeParams();
-        buyVaultBp = vaultBp;
-        buyMarketingBp = marketingBp;
-        buyCommunityBp = communityBp;
-        buyTcgvBurnBp = tcgvBurnBp;
+        _buyVaultBp = vaultBp;
+        _buyMarketingBp = marketingBp;
+        _buyCommunityBp = communityBp;
+        _buyTcgvBurnBp = tcgvBurnBp;
         emit BuyFeeParamsUpdated(vaultBp, marketingBp, communityBp, tcgvBurnBp);
     }
 
@@ -131,13 +157,21 @@ contract TCGVaultBuyRouter is Ownable {
         if (vaultShareBp + autolpShareBp + marketingShareBp + communityShareBp + burnShareBp != 10000) {
             revert InvalidFeeParams();
         }
-        sellTaxBp = taxBp;
-        sellVaultShareBp = vaultShareBp;
-        sellAutolpShareBp = autolpShareBp;
-        sellMarketingShareBp = marketingShareBp;
-        sellCommunityShareBp = communityShareBp;
-        sellBurnShareBp = burnShareBp;
+        _sellTaxBp = taxBp;
+        _sellVaultShareBp = vaultShareBp;
+        _sellAutolpShareBp = autolpShareBp;
+        _sellMarketingShareBp = marketingShareBp;
+        _sellCommunityShareBp = communityShareBp;
+        _sellBurnShareBp = burnShareBp;
         emit SellFeeParamsUpdated(taxBp, vaultShareBp, autolpShareBp, marketingShareBp, communityShareBp, burnShareBp);
+    }
+
+    function _sweepBNB(address recipient) private {
+        uint256 bal = address(this).balance;
+        if (bal == 0) return;
+        address to = recipient == address(0) ? msg.sender : recipient;
+        (bool ok,) = payable(to).call{value: bal}("");
+        if (!ok) revert SweepFailed();
     }
 
     /**
@@ -145,7 +179,7 @@ contract TCGVaultBuyRouter is Ownable {
      */
     function _pairFor(address tokenA, address tokenB) internal view returns (address pair) {
         (address token0, address token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
-        pair = IPancakeFactory(factory).getPair(token0, token1);
+        pair = IPancakeFactory(_factory).getPair(token0, token1);
     }
 
     /**
@@ -205,107 +239,98 @@ contract TCGVaultBuyRouter is Ownable {
         if (msg.value == 0) revert ZeroBNB();
         if (deadline < block.timestamp) revert Expired();
 
-        uint256 vaultBNB = (msg.value * buyVaultBp) / 10000;
-        uint256 marketingBNB = (msg.value * buyMarketingBp) / 10000;
-        uint256 communityBNB = (msg.value * buyCommunityBp) / 10000;
+        uint256 vaultBNB = (msg.value * _buyVaultBp) / 10000;
+        uint256 marketingBNB = (msg.value * _buyMarketingBp) / 10000;
+        uint256 communityBNB = (msg.value * _buyCommunityBp) / 10000;
         uint256 feeBNB = vaultBNB + marketingBNB + communityBNB;
         uint256 swapAmount = msg.value - feeBNB;
 
-        if (vaultBNB > 0 && vault != address(0)) {
-            (bool ok,) = payable(vault).call{value: vaultBNB}("");
+        if (vaultBNB > 0) {
+            (bool ok,) = payable(_vault).call{value: vaultBNB}("");
             if (!ok) revert VaultTransferFailed();
         }
-        if (marketingBNB > 0 && marketing != address(0)) {
-            (bool ok,) = payable(marketing).call{value: marketingBNB}("");
+        if (marketingBNB > 0) {
+            (bool ok,) = payable(_marketing).call{value: marketingBNB}("");
             if (!ok) revert MarketingTransferFailed();
         }
-        if (communityBNB > 0 && community != address(0)) {
-            (bool ok,) = payable(community).call{value: communityBNB}("");
+        if (communityBNB > 0) {
+            (bool ok,) = payable(_community).call{value: communityBNB}("");
             if (!ok) revert CommunityTransferFailed();
         }
 
         // Build path [WETH, TCGV]
         address[] memory path = new address[](2);
-        path[0] = weth;
-        path[1] = address(tcgv);
+        path[0] = _weth;
+        path[1] = address(_tcgv);
 
         // Deposit ETH to WETH
-        IWETH(weth).deposit{value: swapAmount}();
+        IWETH(_weth).deposit{value: swapAmount}();
 
         // Get pair address and transfer WETH to pair
         address pair = _pairFor(path[0], path[1]);
-        IWETH(weth).transfer(pair, swapAmount);
+        IWETH(_weth).transfer(pair, swapAmount);
 
         // Record balance before swap
-        uint256 balanceBefore = tcgv.balanceOf(address(this));
+        uint256 balanceBefore = _tcgv.balanceOf(address(this));
 
         // Execute swap directly with pair
         _swapSupportingFeeOnTransferTokens(path, address(this));
 
         // Verify minimum output
-        uint256 balanceAfter = tcgv.balanceOf(address(this));
+        uint256 balanceAfter = _tcgv.balanceOf(address(this));
         uint256 tcgvReceived = balanceAfter - balanceBefore;
         if (tcgvReceived < amountOutMin) revert InsufficientOutputAmount();
         if (tcgvReceived == 0) revert NoTCGVReceived();
 
         // Burn configured % of received TCGV (burns from this contract, no transfer needed)
-        uint256 burnAmount = (tcgvReceived * buyTcgvBurnBp) / 10000;
+        uint256 burnAmount = (tcgvReceived * _buyTcgvBurnBp) / 10000;
         if (burnAmount > 0) {
-            tcgv.burn(burnAmount);
+            _tcgv.burn(burnAmount);
         }
         
         // Mint NEXUS cashback and transfer remaining TCGV to user
         // This transfer (this→user) is not taxed because this contract is excluded from fees
         uint256 tcgvToUser = tcgvReceived - burnAmount;
-        tcgv.recordBuyAndMintCashback(msg.sender, tcgvReceived);
-        tcgv.transfer(msg.sender, tcgvToUser);
+        _tcgv.recordBuyAndMintCashback(msg.sender, tcgvReceived);
+        _tcgv.transfer(msg.sender, tcgvToUser);
         emit BuyWithBNB(msg.sender, msg.value, feeBNB, tcgvToUser);
+
+        _sweepBNB(_vault);
     }
 
     /**
      * @notice Calculate sell fee distribution
      */
     function _calculateSellFees(uint256 totalFee) private view returns (SellFeeDistribution memory fees) {
-        fees.vaultAmount = (totalFee * sellVaultShareBp) / 10000;
-        fees.autolpAmount = (totalFee * sellAutolpShareBp) / 10000;
-        fees.marketingAmount = (totalFee * sellMarketingShareBp) / 10000;
-        fees.communityAmount = (totalFee * sellCommunityShareBp) / 10000;
-        fees.burnAmount = (totalFee * sellBurnShareBp) / 10000;
+        fees.vaultAmount = (totalFee * _sellVaultShareBp) / 10000;
+        fees.autolpAmount = (totalFee * _sellAutolpShareBp) / 10000;
+        fees.marketingAmount = (totalFee * _sellMarketingShareBp) / 10000;
+        fees.communityAmount = (totalFee * _sellCommunityShareBp) / 10000;
+        fees.burnAmount = (totalFee * _sellBurnShareBp) / 10000;
     }
 
     /**
      * @notice Distribute sell fees to recipients
      */
     function _distributeSellFees(SellFeeDistribution memory fees) private {
-        if (fees.vaultAmount > 0 && vault != address(0)) {
-            tcgv.transfer(vault, fees.vaultAmount);
-        }
-        if (fees.marketingAmount > 0 && marketing != address(0)) {
-            tcgv.transfer(marketing, fees.marketingAmount);
-        }
-        if (fees.communityAmount > 0 && community != address(0)) {
-            tcgv.transfer(community, fees.communityAmount);
-        }
-        if (fees.burnAmount > 0) {
-            tcgv.burn(fees.burnAmount);
-        }
+        if (fees.vaultAmount > 0) _tcgv.transfer(_vault, fees.vaultAmount);
+        if (fees.marketingAmount > 0) _tcgv.transfer(_marketing, fees.marketingAmount);
+        if (fees.communityAmount > 0) _tcgv.transfer(_community, fees.communityAmount);
+        if (fees.burnAmount > 0) _tcgv.burn(fees.burnAmount);
     }
 
     /**
-     * @notice Sell TCGV for BNB. Fee (10%) is taken in TCGV: 4% vault, 3% auto-LP, 1% marketing, 1% community, 1% burn.
+     * @notice Sell TCGV for BNB. Fee (10%) is taken in TCGV: 4% vault, 3% autolp (sent to vault for manual LP add), 1% marketing, 1% community, 1% burn.
      */
     function sellTCGVForBNB(uint256 amountIn, uint256 amountOutMin, uint256 deadline) external {
         if (amountIn == 0) revert ZeroTCGV();
         if (deadline < block.timestamp) revert Expired();
 
         // Pull TCGV from user
-        tcgv.transferFrom(msg.sender, address(this), amountIn);
+        _tcgv.transferFrom(msg.sender, address(this), amountIn);
 
-        // Calculate sell fee
-        uint256 totalFee = (amountIn * sellTaxBp) / 10000;
-        uint256 amountToSwap = amountIn - totalFee;
-
-        // Calculate fee distribution
+        // Calculate sell fee and distribution
+        uint256 totalFee = (amountIn * _sellTaxBp) / 10000;
         SellFeeDistribution memory fees = _calculateSellFees(totalFee);
 
         // Distribute fees (except autolpAmount which is kept for liquidity)
@@ -313,19 +338,19 @@ contract TCGVaultBuyRouter is Ownable {
 
         // Build path [TCGV, WETH]
         address[] memory path = new address[](2);
-        path[0] = address(tcgv);
-        path[1] = weth;
+        path[0] = address(_tcgv);
+        path[1] = _weth;
 
-        // Get pair address and transfer TCGV to pair
+        // Get pair address and transfer TCGV to pair (amountIn minus fee)
         address pair = _pairFor(path[0], path[1]);
-        tcgv.transfer(pair, amountToSwap);
+        _tcgv.transfer(pair, amountIn - totalFee);
 
         // Execute swap and get WETH
         uint256 wethReceived = _swapTCGVForWETH(path);
         if (wethReceived == 0) revert InsufficientOutputAmount();
 
-        // Withdraw WETH to BNB and handle liquidity/user payment
-        uint256 userBnb = _processSellLiquidityAndPayment(fees.autolpAmount, amountToSwap, wethReceived, deadline);
+        // Withdraw WETH to BNB; send autolp TCGV to vault for manual LP, user gets all BNB
+        uint256 userBnb = _processSellLiquidityAndPayment(fees.autolpAmount, wethReceived);
         
         // Verify minimum output and send BNB to user
         if (userBnb < amountOutMin) revert InsufficientOutputAmount();
@@ -335,48 +360,28 @@ contract TCGVaultBuyRouter is Ownable {
         }
 
         emit SellTCGVForBNB(msg.sender, amountIn, totalFee, userBnb);
+
+        _sweepBNB(_vault);
     }
 
     /**
      * @notice Swap TCGV for WETH and return amount received
      */
     function _swapTCGVForWETH(address[] memory path) private returns (uint256 wethReceived) {
-        uint256 wethBalanceBefore = IWETH(weth).balanceOf(address(this));
+        uint256 wethBalanceBefore = IWETH(_weth).balanceOf(address(this));
         _swapSupportingFeeOnTransferTokens(path, address(this));
-        uint256 wethBalanceAfter = IWETH(weth).balanceOf(address(this));
+        uint256 wethBalanceAfter = IWETH(_weth).balanceOf(address(this));
         wethReceived = wethBalanceAfter - wethBalanceBefore;
     }
 
     /**
-     * @notice Process liquidity addition and calculate user BNB payment
+     * @notice Send autolp TCGV to vault for manual liquidity add. User receives all BNB from the swap.
+     * @dev Whitepaper: autoliquidity LP is not added automatically per sell; vault adds liquidity manually (e.g. via TCGVaultLiquidityWrapper).
      */
-    function _processSellLiquidityAndPayment(
-        uint256 autolpAmount,
-        uint256 amountToSwap,
-        uint256 wethReceived,
-        uint256 deadline
-    ) private returns (uint256 userBnb) {
-        // Withdraw WETH to BNB
-        IWETH(weth).withdraw(wethReceived);
-        uint256 bnbReceived = address(this).balance;
-
-        // Calculate proportional BNB for auto-LP
-        uint256 bnbForLp = (bnbReceived * autolpAmount) / amountToSwap;
-        userBnb = bnbReceived - bnbForLp;
-
-        // Add liquidity with 3% TCGV + proportional BNB
-        if (autolpAmount > 0 && bnbForLp > 0) {
-            tcgv.approve(router, autolpAmount);
-            address lpRecipient = vault != address(0) ? vault : address(this);
-            IPancakeRouter02(router).addLiquidityETH{value: bnbForLp}(
-                address(tcgv),
-                autolpAmount,
-                0,
-                0,
-                lpRecipient,
-                deadline
-            );
-        }
+    function _processSellLiquidityAndPayment(uint256 autolpAmount, uint256 wethReceived) private returns (uint256 userBnb) {
+        IWETH(_weth).withdraw(wethReceived);
+        userBnb = address(this).balance;
+        if (autolpAmount > 0) _tcgv.transfer(_vault, autolpAmount);
     }
 
     error InvalidFeeParams();

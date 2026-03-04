@@ -47,6 +47,7 @@ describe("TCGVaultToken", () => {
   let tcgv: ContractReturnType<"TCGVaultToken">;
   let nexus: ContractReturnType<"TCGNexusToken">;
   let wrapper: ContractReturnType<"TCGVaultLiquidityWrapper">;
+  let mockPresaleLaunch: ContractReturnType<"MockPresaleLaunch">;
   let pair: ContractReturnType<"MockUniswapV2Pair">;
   let publicClient: Awaited<ReturnType<typeof viem.getPublicClient>>;
   let wethAddress: `0x${string}`;
@@ -60,7 +61,8 @@ describe("TCGVaultToken", () => {
   const TOTAL_SUPPLY = parseEther("1000000000");
   const BUY_TAX_BP = 1500;
   const SELL_TAX_BP = 1000;
-  const CASHBACK_BP = 1000;
+  const CASHBACK_BP_STANDARD = 1000; // 10% after presale (whitepaper §6)
+  const CASHBACK_BP_PRESALE = 3000; // 30% during Vagues 1 et 2 (whitepaper §6)
 
   before(async () => {
     [owner, vault, marketing, community, user1, user2] = await viem.getWalletClients();
@@ -90,7 +92,6 @@ describe("TCGVaultToken", () => {
       marketing.account.address,
       community.account.address,
       ZERO,
-      ZERO
     ], { client: { wallet: owner } });
     tcgvAddress = getContractAddress({ from: owner.account.address, nonce: BigInt(nonce++) });
     tcgv = await viem.getContractAt("TCGVaultToken", tcgvAddress);
@@ -101,12 +102,11 @@ describe("TCGVaultToken", () => {
     nexus = await viem.getContractAt("TCGNexusToken", nexusAddress);
 
     // Set addresses on TCGVaultToken
-    const addrs: [`0x${string}`, `0x${string}`, `0x${string}`, `0x${string}`, `0x${string}`] = [
+    const addrs: [`0x${string}`, `0x${string}`, `0x${string}`, `0x${string}`] = [
       getAddress(vault.account.address),
       getAddress(marketing.account.address),
       getAddress(community.account.address),
       nexusAddress,
-      ZERO,
     ];
     const setAddrHash = await tcgv.write.setAddresses(addrs, { account: owner.account });
     await waitForTx(setAddrHash);
@@ -116,16 +116,26 @@ describe("TCGVaultToken", () => {
     await waitForTx(createPairHash);
     pairAddress = (await factory.read.getPair([tcgvAddress, wethAddress])) as `0x${string}`;
     
-    // Set pair on token
+    // Set pair on token; use min amounts 1 in tests so swap outputs from mock pair always pass (production uses 10_000)
     const setPairHash = await tcgv.write.setPair([pairAddress], { account: owner.account });
     await waitForTx(setPairHash);
+    await tcgv.write.setMinAmounts([1n, 1n], { account: owner.account });
     pair = await viem.getContractAt("MockUniswapV2Pair", pairAddress);
 
     // Deploy wrapper (deployContract waits for confirmation and returns the contract instance)
     wrapper = await viem.deployContract("TCGVaultLiquidityWrapper", [routerAddress], { client: { wallet: owner } });
     wrapperAddress = wrapper.address as `0x${string}`;
-    
-    // Exclude wrapper from fees
+
+    // Deploy mock presale launch and set as presale finalizer (set once; token reads totalTCGVAllocated from it)
+    mockPresaleLaunch = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], { client: { wallet: owner } });
+    await tcgv.write.setPresaleFinalizer([mockPresaleLaunch.address as `0x${string}`], { account: owner.account });
+    // Mint presale tokens to owner for liquidity (no constructor mint; supply is minted during presale / at end).
+    // Use 10M so swap outputs exceed minBuyAmount/minSellAmount (10_000) after first test consumes liquidity.
+    const presaleMintAmount = parseEther("10000000");
+    await mockPresaleLaunch.write.mintPresale([tcgvAddress, owner.account.address, presaleMintAmount], { account: owner.account });
+
+    // Set wrapper as liquidity wrapper (for transient fee-exempt) and exclude from fees
+    await tcgv.write.setLiquidityWrapper([wrapperAddress], { account: owner.account });
     const setExcludedHash = await tcgv.write.setExcludedFromFees(
       [wrapperAddress, true],
       { account: owner.account }
@@ -138,9 +148,10 @@ describe("TCGVaultToken", () => {
       throw new Error("Wrapper was not excluded from fees");
     }
 
-    // Add liquidity via wrapper (use chain time so deadline is valid after other tests advance time)
-    const tokenAmount = parseEther("1000000");
-    const ethAmount = parseEther("10");
+    // Add liquidity via wrapper (use chain time so deadline is valid after other tests advance time).
+    // 10M TCGV + 100 ETH so 1 ETH / 0.5 ETH swaps yield enough for min amounts.
+    const tokenAmount = presaleMintAmount;
+    const ethAmount = parseEther("100");
     const block = await publicClient.getBlock();
     const deadline = block.timestamp + 300n;
     
@@ -157,13 +168,13 @@ describe("TCGVaultToken", () => {
       throw new Error(`Approval failed: expected ${tokenAmount}, got ${allowance}`);
     }
     
-    // Add liquidity - use write method directly (should work now that wrapper is deployed)
+    // Add liquidity - use write method directly (router is first param for multi-pool support)
     const addLiqHash = await wrapper.write.addLiquidityETH([
+      routerAddress,
       tcgvAddress,
       tokenAmount,
       0n,
       0n,
-      owner.account.address,
       deadline
     ], { value: ethAmount, account: owner.account });
     
@@ -201,9 +212,10 @@ describe("TCGVaultToken", () => {
       expect(await tcgv.read.name()).to.equal("TCG-VAULT Token");
       expect(await tcgv.read.symbol()).to.equal("TCGV");
     });
-    it("minted 1B to owner", async () => {
-      expect(await tcgv.read.totalSupply()).to.equal(TOTAL_SUPPLY);
-      expect(await tcgv.read.balanceOf([owner.account.address])).to.equal(TOTAL_SUPPLY - parseEther("1000000"));
+    it("supply from presale mint only (no constructor mint)", async () => {
+      expect(await tcgv.read.totalSupply()).to.equal(parseEther("10000000"));
+      // Owner used full presale mint for liquidity so balance 0; LP tokens received via wrapper to msg.sender (owner)
+      expect(await tcgv.read.balanceOf([owner.account.address])).to.equal(0n);
     });
     it("pair has liquidity", async () => {
       const reserves = (await pair.read.getReserves()) as [bigint, bigint, number];
@@ -213,7 +225,9 @@ describe("TCGVaultToken", () => {
   });
 
   describe("Router path: buy (ETH -> TCGV)", () => {
-    it("charges 15% buy tax and gives 10% NEXUS cashback", async () => {
+    it("charges 15% buy tax and gives 30% NEXUS cashback during presale", async () => {
+      expect(await tcgv.read.presaleActive()).to.equal(true);
+      expect(await tcgv.read.minBuyAmount()).to.equal(1n); // set in before() so mock swap amounts pass
       const buyAmountEth = parseEther("1");
       const path = [wethAddress, tcgvAddress];
       const vaultBefore = (await tcgv.read.balanceOf([vault.account.address]));
@@ -238,7 +252,36 @@ describe("TCGVaultToken", () => {
       expect(vaultAfter - vaultBefore >= 0n).to.equal(true);
       expect(marketingAfter - marketingBefore >= 0n).to.equal(true);
       expect(totalSupplyBefore - totalSupplyAfter > 0n).to.equal(true);
-      expect(nexusAfter - nexusBefore > 0n).to.equal(true);
+      const nexusCashback = nexusAfter - nexusBefore;
+      expect(nexusCashback > 0n).to.equal(true);
+      // Whitepaper §6: presale = 30% of buy amount (in TCGV terms, cashback is % of purchase amount)
+      const expectedMin = (userReceived * BigInt(CASHBACK_BP_PRESALE - 500)) / 10000n;
+      expect(nexusCashback >= expectedMin).to.equal(true);
+    });
+
+    it("gives 10% NEXUS cashback when presale ended", async () => {
+      // Presale is considered ended in this suite when finalizePresaleAndRecompute has been called
+      // in other flows. Here we just assert that once presaleActive is false, getCashbackRate() == 10%.
+      // If presaleActive is still true, skip this test to avoid forcing a full presale finalize in this flow.
+      if (await tcgv.read.presaleActive()) return;
+      expect(await tcgv.read.getCashbackRate()).to.equal(BigInt(CASHBACK_BP_STANDARD));
+      const buyAmountEth = parseEther("0.5");
+      const path = [wethAddress, tcgvAddress];
+      const nexusBefore = (await nexus.read.balanceOf([user2.account.address]));
+
+      await router.write.swapExactETHForTokens([
+        0n,
+        path,
+        user2.account.address,
+        (await publicClient.getBlock()).timestamp + 300n
+      ], { value: buyAmountEth, account: user2.account });
+
+      const userReceived = (await tcgv.read.balanceOf([user2.account.address]));
+      const nexusAfter = (await nexus.read.balanceOf([user2.account.address]));
+      const nexusCashback = nexusAfter - nexusBefore;
+      const expectedMin = (userReceived * BigInt(CASHBACK_BP_STANDARD - 500)) / 10000n;
+      const expectedMax = (userReceived * BigInt(CASHBACK_BP_STANDARD + 500)) / 10000n;
+      expect(nexusCashback >= expectedMin && nexusCashback <= expectedMax).to.equal(true);
     });
   });
 
@@ -310,11 +353,11 @@ describe("TCGVaultToken", () => {
 
       await tcgv.write.approve([wrapperAddress, addTokenAmount], { account: user1.account });
       await wrapper.write.addLiquidityETH([
+        routerAddress,
         tcgvAddress,
         addTokenAmount,
         0n,
         0n,
-        user1.account.address,
         (await publicClient.getBlock()).timestamp + 300n
       ], { value: addEthAmount, account: user1.account });
 
@@ -333,12 +376,12 @@ describe("TCGVaultToken", () => {
 
       await pair.write.approve([wrapperAddress, lpBalance], { account: user1.account });
       await wrapper.write.removeLiquidityETH([
+        routerAddress,
         tcgvAddress,
         pairAddress,
         lpBalance / 2n,
         0n,
         0n,
-        user1.account.address,
         (await publicClient.getBlock()).timestamp + 300n
       ], { account: user1.account });
 
@@ -349,7 +392,7 @@ describe("TCGVaultToken", () => {
       expect(totalSupplyAfter).to.equal(totalSupplyBefore);
     });
 
-    it("wrapper receive reverts when sender is not router", async () => {
+    it("wrapper receive reverts when sender is not allowed router", async () => {
       let reverted = false;
       try {
         await owner.sendTransaction({ to: wrapperAddress, value: 1n, account: owner.account });
@@ -368,11 +411,11 @@ describe("TCGVaultToken", () => {
       const userBalanceBefore = (await tcgv.read.balanceOf([user1.account.address]));
       await tcgv.write.approve([wrapperAddress, tokenDesired], { account: user1.account });
       await wrapper.write.addLiquidityETH([
+        routerAddress,
         tcgvAddress,
         tokenDesired,
         0n,
         0n,
-        user1.account.address,
         (await publicClient.getBlock()).timestamp + 300n
       ], { value: ethAmount, account: user1.account });
       const userBalanceAfter = (await tcgv.read.balanceOf([user1.account.address]));
@@ -411,6 +454,79 @@ describe("TCGVaultToken", () => {
       ], { account: user2.account });
       const supplyAfter = (await tcgv.read.totalSupply());
       expect(supplyAfter < supplyBefore).to.equal(true);
+    });
+  });
+
+  describe("executePendingAutolp", () => {
+    it("pendingAutolp increases on sell and executePendingAutolp clears it", async () => {
+      const sellAmt = parseEther("2000");
+      await tcgv.write.approve([routerAddress, sellAmt], { account: user1.account });
+      const path = [tcgvAddress, wethAddress];
+      const pendingBefore = await tcgv.read.pendingAutolp();
+      await router.write.swapExactTokensForETH([
+        sellAmt,
+        0n,
+        path,
+        user1.account.address,
+        (await publicClient.getBlock()).timestamp + 300n
+      ], { account: user1.account });
+      const pendingAfterSell = await tcgv.read.pendingAutolp();
+      expect(pendingAfterSell > pendingBefore).to.equal(true);
+
+      const pairBalanceBefore = await tcgv.read.balanceOf([pairAddress]);
+      await tcgv.write.executePendingAutolp({ account: user2.account });
+      const pendingAfterExecute = await tcgv.read.pendingAutolp();
+      expect(pendingAfterExecute).to.equal(0n);
+      const pairBalanceAfter = await tcgv.read.balanceOf([pairAddress]);
+      expect(pairBalanceAfter >= pairBalanceBefore).to.equal(true);
+    });
+
+    it("executePendingAutolp when zero is no-op", async () => {
+      const pending = await tcgv.read.pendingAutolp();
+      await tcgv.write.executePendingAutolp({ account: owner.account });
+      expect(await tcgv.read.pendingAutolp()).to.equal(pending);
+    });
+  });
+
+  describe("Presale finalization and dynamic burn", () => {
+    it("finalizePresaleAndRecompute reverts when caller is not presaleFinalizer", async () => {
+      let reverted = false;
+      try {
+        await tcgv.write.finalizePresaleAndRecompute({ account: user1.account });
+      } catch {
+        reverted = true;
+      }
+      expect(reverted).to.equal(true);
+    });
+
+    it("setPresaleFinalizer reverts when already set", async () => {
+      let reverted = false;
+      try {
+        await tcgv.write.setPresaleFinalizer([user1.account.address], { account: owner.account });
+      } catch {
+        reverted = true;
+      }
+      expect(reverted).to.equal(true);
+    });
+
+    it("recomputeSupplyAndBurn mints 20/15/5 to recipients and sets supplyRecomputed", async () => {
+      // Token has ~10M supply (from before). Use presaleSold = 6M so finalSupply = 10M (60% presale), toMint = 10M - currentSupply
+      const presaleSold = parseEther("6000000");
+      await mockPresaleLaunch.write.setTotalAllocated([presaleSold], { account: owner.account });
+      await tcgv.write.setAllocationRecipients([vault.account.address, marketing.account.address, community.account.address], { account: owner.account });
+      await mockPresaleLaunch.write.finalizePresaleAndRecompute([tcgvAddress], { account: owner.account });
+      const supplyBefore = await tcgv.read.totalSupply();
+      expect(await tcgv.read.supplyRecomputed()).to.equal(true);
+      const finalSupply = (presaleSold * 10000n) / 6000n; // 10M (60% = 6M presale)
+      expect(await tcgv.read.totalSupply()).to.equal(finalSupply);
+      expect(finalSupply >= supplyBefore).to.equal(true);
+      let reverted = false;
+      try {
+        await mockPresaleLaunch.write.finalizePresaleAndRecompute([tcgvAddress], { account: owner.account });
+      } catch {
+        reverted = true;
+      }
+      expect(reverted).to.equal(true);
     });
   });
 

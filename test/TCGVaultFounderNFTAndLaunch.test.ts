@@ -1,6 +1,6 @@
 /**
  * Tests for Founder NFT and Initial Launch (whitepaper §6, §7).
- * Uses mock ERC20 for USDC and TCGV to avoid deploying full TCGVaultToken.
+ * Uses MockWETH for USDC and MockTCGVPresale for TCGV (mint on buy via mintPresale).
  */
 import { describe, it, before } from "node:test";
 import { expect } from "chai";
@@ -27,7 +27,7 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
   let nexus: ContractReturnType<"TCGNexusToken">;
   let founderNFT: ContractReturnType<"TCGVaultFounderNFT">;
   let initialLaunch: ContractReturnType<"TCGVaultInitialLaunch">;
-  let tcgv: ContractReturnType<"MockWETH">;
+  let tcgv: ContractReturnType<"MockTCGVPresale">;
 
   const WAVE1_PRICE = 200 * 1e6;
   const WAVE2_PRICE = 350 * 1e6;
@@ -40,9 +40,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
     await usdc.write.deposit({ value: parseEther("100"), account: owner.account });
     await usdc.write.transfer([user1.account.address, parseEther("50")], { account: owner.account });
 
-    const mockTcgv = await viem.deployContract("MockWETH", [], { client: { wallet: owner } });
-    tcgv = await viem.getContractAt("MockWETH", mockTcgv.address);
-    await tcgv.write.deposit({ value: parseEther("1000"), account: owner.account });
+    const mockTcgv = await viem.deployContract("contracts/test/MockTCGVPresale.sol:MockTCGVPresale", [], { client: { wallet: owner } });
+    tcgv = await viem.getContractAt("MockTCGVPresale", mockTcgv.address);
 
     nexus = await viem.deployContract("TCGNexusToken", [owner.account.address], { client: { wallet: owner } });
 
@@ -59,11 +58,9 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       owner.account.address,
     ], { client: { wallet: owner } });
 
+    await tcgv.write.setPresaleFinalizer([initialLaunch.address], { account: owner.account });
     await nexus.write.setPresaleMinter([founderNFT.address, true], { account: owner.account });
     await nexus.write.setPresaleMinter([initialLaunch.address, true], { account: owner.account });
-
-    // Enough TCGV for presale vesting claims in tests (1000 tokens)
-    await tcgv.write.transfer([initialLaunch.address, parseEther("1000")], { account: owner.account });
   });
 
   describe("TCGVaultFounderNFT", () => {
@@ -246,19 +243,5 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       await expectRevert(launchNoFinalize.write.claim({ account: user1.account }));
     });
 
-    it("basicNFTSoldCount returns 0 when staticcall fails (EOA)", async () => {
-      const [u0] = await viem.getWalletClients();
-      const count = await initialLaunch.read.basicNFTSoldCount([u0.account.address]);
-      expect(count).to.equal(0n);
-    });
-
-    it("basicNFTSoldCount returns 0 for zero address", async () => {
-      expect(await initialLaunch.read.basicNFTSoldCount(["0x0000000000000000000000000000000000000000"])).to.equal(0n);
-    });
-
-    it("basicNFTSoldCount returns totalSupply for contract with totalSupply()", async () => {
-      const count = await initialLaunch.read.basicNFTSoldCount([tcgv.address]);
-      expect(count).to.equal(await tcgv.read.totalSupply());
-    });
   });
 });

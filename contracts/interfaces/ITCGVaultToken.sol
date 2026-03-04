@@ -8,5 +8,9 @@ interface ITCGVaultToken {
     function approve(address spender, uint256 amount) external returns (bool);
     function recordBuyAndMintCashback(address recipient, uint256 tcgvAmount) external;
     function burn(uint256 amount) external;
+    /// @notice Mint presale TCGV; only callable by presale finalizer (e.g. launch contract) during presale.
+    function mintPresale(address to, uint256 amount) external;
+    /// @notice Finalize presale and recompute supply (60/20/15/5) in a single call.
+    function finalizePresaleAndRecompute() external;
 }
 

@@ -38,8 +38,7 @@ The whitepaper §7 describes **Founder Edition** NFTs (500) and **Édition basiq
        vaultAddress,
        marketingAddress,
        communityAddress,
-       address(0), // nexusToken set later via setAddresses
-       stablecoinAddress   // USDC per whitepaper
+       address(0)  // nexusToken set later via setAddresses
    );
    ```
 
@@ -54,8 +53,7 @@ The whitepaper §7 describes **Founder Edition** NFTs (500) and **Édition basiq
        vaultAddress,
        marketingAddress,
        communityAddress,
-       address(nexusToken),
-       stablecoinAddress
+       address(nexusToken)
    );
    ```
 

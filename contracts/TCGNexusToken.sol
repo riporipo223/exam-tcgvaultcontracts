@@ -27,20 +27,29 @@ contract TCGNexusToken is ERC20Permit, ERC20Votes, Ownable {
     error SoulboundTransferNotAllowed();
 
     /// @notice TCGVaultToken contract; only it can mint cashback. Set at deployment, immutable.
-    address public immutable minter;
+    address private immutable _minter;
     /// @notice Contracts allowed to mint 30% NEXUS during presale (Founder NFT, Initial Launch).
-    mapping(address => bool) public allowedPresaleMinters;
+    mapping(address => bool) private _allowedPresaleMinters;
+
+    // External getters (private/external pattern)
+    function minter() external view returns (address) {
+        return _minter;
+    }
+
+    function allowedPresaleMinters(address account) external view returns (bool) {
+        return _allowedPresaleMinters[account];
+    }
 
     event CashbackMinted(address indexed recipient, uint256 amount);
     event PresaleBonusMinted(address indexed recipient, uint256 amount);
 
     constructor(address minter_) ERC20("TCG-NEXUS", "NEXUS") ERC20Permit("TCG-NEXUS") Ownable(msg.sender) {
         if (minter_ == address(0)) revert ZeroAddress();
-        minter = minter_;
+        _minter = minter_;
     }
 
     function setPresaleMinter(address account, bool allowed) external onlyOwner {
-        allowedPresaleMinters[account] = allowed;
+        _allowedPresaleMinters[account] = allowed;
     }
 
     /// @dev Resolve nonces() conflict between ERC20Permit and Votes (both use Nonces).
@@ -61,7 +70,7 @@ contract TCGNexusToken is ERC20Permit, ERC20Votes, Ownable {
      * @dev Access: only minter (TCGVaultToken, set at deployment).
      */
     function mintCashback(address recipient, uint256 amount) external {
-        if (msg.sender != minter) revert OnlyMinter();
+        if (msg.sender != _minter) revert OnlyMinter();
         if (recipient == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
 
@@ -74,7 +83,7 @@ contract TCGNexusToken is ERC20Permit, ERC20Votes, Ownable {
      * @dev Access: only addresses in allowedPresaleMinters (set via setPresaleMinter by owner).
      */
     function mintPresaleBonus(address recipient, uint256 amount) external {
-        if (!allowedPresaleMinters[msg.sender]) revert OnlyPresaleMinter();
+        if (!_allowedPresaleMinters[msg.sender]) revert OnlyPresaleMinter();
         if (recipient == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
         _mint(recipient, amount);

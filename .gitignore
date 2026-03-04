@@ -4,6 +4,7 @@ artifacts
 ignition/deployments/chain-31337
 coverage
 coverage.json
+*.sol.bak
 
 # Yarn
 .pnp.*

@@ -9,6 +9,7 @@
     "clean": "hardhat clean",
     "node": "hardhat node",
     "test": "hardhat test",
+    "coverage": "node scripts/run-coverage.mjs",
     "deploy:local": "hardhat run scripts/deployTCGVault.ts --network localhost",
     "deploy:gnosis": "hardhat run scripts/deployTCGVault.ts --network gnosis",
     "deploy:sepolia": "hardhat run scripts/deployTCGVault.ts --network sepolia",

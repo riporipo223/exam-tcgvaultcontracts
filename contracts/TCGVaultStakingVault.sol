@@ -13,9 +13,18 @@ import "./interfaces/ITCGVaultBasicNFT.sol";
  */
 contract TCGVaultStakingVault is ERC4626, Ownable {
     /// @notice Minimum shares required to hold a Basic NFT. Below this, Basic NFT is burned on withdraw.
-    uint256 public minStakeForBasicNFT;
+    uint256 private _minStakeForBasicNFT;
     /// @notice Basic NFT contract to call when stake drops below minimum.
-    address public basicNFTContract;
+    address private _basicNFTContract;
+
+    // External getters (private/external pattern)
+    function minStakeForBasicNFT() external view returns (uint256) {
+        return _minStakeForBasicNFT;
+    }
+
+    function basicNFTContract() external view returns (address) {
+        return _basicNFTContract;
+    }
 
     constructor(IERC20 asset_)
         ERC4626(asset_)
@@ -24,17 +33,17 @@ contract TCGVaultStakingVault is ERC4626, Ownable {
     {}
 
     function setMinStakeForBasicNFT(uint256 minShares) external onlyOwner {
-        minStakeForBasicNFT = minShares;
+        _minStakeForBasicNFT = minShares;
     }
 
     function setBasicNFTContract(address basicNFT_) external onlyOwner {
-        basicNFTContract = basicNFT_;
+        _basicNFTContract = basicNFT_;
     }
 
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal virtual override {
         super._deposit(caller, receiver, assets, shares);
-        if (basicNFTContract != address(0) && minStakeForBasicNFT > 0 && balanceOf(receiver) >= minStakeForBasicNFT) {
-            ITCGVaultBasicNFT(basicNFTContract).mintFor(receiver);
+        if (_basicNFTContract != address(0) && _minStakeForBasicNFT > 0 && balanceOf(receiver) >= _minStakeForBasicNFT) {
+            ITCGVaultBasicNFT(_basicNFTContract).mintFor(receiver);
         }
     }
 
@@ -46,8 +55,8 @@ contract TCGVaultStakingVault is ERC4626, Ownable {
         uint256 shares
     ) internal virtual override {
         super._withdraw(caller, receiver, owner, assets, shares);
-        if (basicNFTContract != address(0) && minStakeForBasicNFT > 0 && balanceOf(owner) < minStakeForBasicNFT) {
-            ITCGVaultBasicNFT(basicNFTContract).burnAllFor(owner);
+        if (_basicNFTContract != address(0) && _minStakeForBasicNFT > 0 && balanceOf(owner) < _minStakeForBasicNFT) {
+            ITCGVaultBasicNFT(_basicNFTContract).burnAllFor(owner);
         }
     }
 }
