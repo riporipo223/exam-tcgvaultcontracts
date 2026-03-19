@@ -35,6 +35,59 @@ contract MockUniswapV2Router {
         amountOut = (amountInWithFee * reserveOut) / (reserveIn * 1000 + amountInWithFee);
     }
 
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint256 amountADesired,
+        uint256 amountBDesired,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        address to,
+        uint256 deadline
+    ) external returns (uint256 amountA, uint256 amountB, uint256 liquidity) {
+        require(deadline >= block.timestamp, "EXPIRED");
+        if (MockUniswapV2Factory(factory).getPair(tokenA, tokenB) == address(0)) {
+            MockUniswapV2Factory(factory).createPair(tokenA, tokenB);
+        }
+        address pair = _pairFor(tokenA, tokenB);
+        (uint256 reserveA, uint256 reserveB) = _getReserves(tokenA, tokenB);
+        if (reserveA == 0 && reserveB == 0) {
+            amountA = amountADesired;
+            amountB = amountBDesired;
+        } else {
+            uint256 amountBOptimal = (amountADesired * reserveB) / reserveA;
+            if (amountBOptimal <= amountBDesired) {
+                require(amountBOptimal >= amountBMin, "INSUFFICIENT_B_AMOUNT");
+                amountA = amountADesired;
+                amountB = amountBOptimal;
+            } else {
+                uint256 amountAOptimal = (amountBDesired * reserveA) / reserveB;
+                require(amountAOptimal >= amountAMin, "INSUFFICIENT_A_AMOUNT");
+                amountA = amountAOptimal;
+                amountB = amountBDesired;
+            }
+        }
+        IERC20(tokenA).transferFrom(msg.sender, pair, amountA);
+        IERC20(tokenB).transferFrom(msg.sender, pair, amountB);
+        liquidity = MockUniswapV2Pair(pair).mint(to);
+    }
+
+    function removeLiquidity(
+        address tokenA,
+        address tokenB,
+        uint256 liquidity,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        address to,
+        uint256 deadline
+    ) external returns (uint256 amountA, uint256 amountB) {
+        require(deadline >= block.timestamp, "EXPIRED");
+        address pair = _pairFor(tokenA, tokenB);
+        IERC20(pair).transferFrom(msg.sender, pair, liquidity);
+        (amountA, amountB) = MockUniswapV2Pair(pair).burn(to);
+        require(amountA >= amountAMin && amountB >= amountBMin, "INSUFFICIENT_AMOUNTS");
+    }
+
     function addLiquidityETH(
         address token,
         uint256 amountTokenDesired,
@@ -96,6 +149,26 @@ contract MockUniswapV2Router {
             (bool ok,) = to.call{value: wethBal}("");
             require(ok, "ETH_TRANSFER_FAILED");
         }
+    }
+
+    function swapExactTokensForTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts) {
+        require(deadline >= block.timestamp, "EXPIRED");
+        require(path.length >= 2, "INVALID_PATH");
+        amounts = new uint256[](path.length);
+        amounts[0] = amountIn;
+        IERC20(path[0]).transferFrom(msg.sender, _pairFor(path[0], path[1]), amountIn);
+        for (uint256 i; i < path.length - 1; i++) {
+            (uint256 reserveIn, uint256 reserveOut) = _getReserves(path[i], path[i + 1]);
+            amounts[i + 1] = _getAmountOut(amounts[i], reserveIn, reserveOut);
+        }
+        require(amounts[path.length - 1] >= amountOutMin, "INSUFFICIENT_OUTPUT");
+        _swap(amounts, path, to);
     }
 
     function swapExactETHForTokens(

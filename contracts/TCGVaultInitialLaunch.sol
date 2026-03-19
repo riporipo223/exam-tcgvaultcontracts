@@ -3,7 +3,7 @@ pragma solidity ^0.8.27;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/ITCGVaultFounderNFT.sol";
 import "./interfaces/ITCGNexusToken.sol";
 import "./interfaces/ITCGVaultToken.sol";
@@ -13,8 +13,11 @@ import "./interfaces/ITCGVaultToken.sol";
  * @notice Prévente (whitepaper §6): TCGV contre USDC. Vague 1: 0,005 $/TCGV jusqu'au 245ème NFT Founder.
  *   Vague 2: 0,008 $/TCGV, compte à rebours 120h puis clôture. Bonus 30 % en $TCGNEXUS. Cap 4 %/wallet, hard cap 600M TCGV.
  *   Vesting: 10 % TGE, puis 10 %/mois sur 9 mois.
+ *
+ * @dev Uses classic ReentrancyGuard instead of ReentrancyGuardTransient for compatibility
+ *      with chains (e.g. BSC) that do not yet support EIP-1153 transient storage opcodes.
  */
-contract TCGVaultInitialLaunch is Ownable, ReentrancyGuardTransient {
+contract TCGVaultInitialLaunch is Ownable, ReentrancyGuard {
     IERC20 private immutable _tcgv;
     IERC20 private immutable _usdc;
     ITCGVaultFounderNFT private immutable _founderNFT;
@@ -22,7 +25,8 @@ contract TCGVaultInitialLaunch is Ownable, ReentrancyGuardTransient {
 
     uint256 public constant PRICE_WAVE1 = 0.005e6;   // 0,005 USDC (6 decimals) per TCGV
     uint256 public constant PRICE_WAVE2 = 0.008e6;    // 0,008 USDC (6 decimals) per TCGV
-    uint256 public constant FOUNDER_NFT_WAVE1_CAP = 245;
+    /// @notice Wave-1 price applies until 250 Founder NFTs are sold.
+    uint256 public constant FOUNDER_NFT_WAVE1_CAP = 250;
     uint256 public constant PRESALE_COUNTDOWN_HOURS = 120;
     uint256 public constant HARD_CAP_TCGV = 600_000_000 * 1e18;
     uint256 public constant MAX_PER_WALLET_BP = 400; // 4 %
@@ -133,7 +137,6 @@ contract TCGVaultInitialLaunch is Ownable, ReentrancyGuardTransient {
         uint256 monthsElapsed = elapsed / (30 days);
         if (monthsElapsed >= 9) return total - claimed;
         uint256 vested = (total * (10 + monthsElapsed * 10)) / 100;
-        if (vested > total) vested = total;
         return vested > claimed ? vested - claimed : 0;
     }
 

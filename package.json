@@ -10,10 +10,13 @@
     "node": "hardhat node",
     "test": "hardhat test",
     "coverage": "node scripts/run-coverage.mjs",
+    "coverage:production": "node scripts/run-coverage.mjs && node scripts/coverage-production-only.mjs",
     "deploy:local": "hardhat run scripts/deployTCGVault.ts --network localhost",
     "deploy:gnosis": "hardhat run scripts/deployTCGVault.ts --network gnosis",
     "deploy:sepolia": "hardhat run scripts/deployTCGVault.ts --network sepolia",
-    "deploy:bsc": "hardhat run scripts/deployTCGVault.ts --network bsc"
+    "deploy:bsc": "hardhat run scripts/deployTCGVault.ts --network bsc",
+    "fork:full": "hardhat run scripts/testFullFlowOnBSCFork.ts --network hardhat",
+    "fork:dex": "hardhat run scripts/testOnBSCFork.ts --network hardhat"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-ignition": "^3.0.8",

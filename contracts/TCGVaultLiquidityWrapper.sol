@@ -7,26 +7,23 @@ import "./interfaces/IRouter.sol";
 
 /// @notice Token may set transient fee-exempt (EIP-1153 is per-contract; wrapper calls token so token's tstore is visible in token's _update).
 interface ITransientFeeExemptToken {
-    function setTransientFeeExempt(uint256 value) external;
+    function setTransientFeeExempt(bool exempt) external;
 }
 
-/// @notice ETH refund to caller failed.
-error RefundETHFailed();
-/// @notice Only an allowed router may send ETH (refund from addLiquidity); use addLiquidityETH to add liquidity.
-error OnlyAllowedRouterCanSendETH();
 /// @notice Router not in the allowed list.
 error RouterNotAllowed();
 
 /**
  * @title TCGVaultLiquidityWrapper
- * @notice Add/remove liquidity on multiple DEXes (e.g. PancakeSwap, Uniswap) without redeploying. Per-router config: fee-exempt (no TCGV fees on LP moves) or fees enforced.
- * @dev For each router, owner sets allowed and whether to set token transient fee-exempt. When fee-exempt, TCGV does not charge fees on add/remove liquidity (whitepaper). When not fee-exempt, normal token fees apply (e.g. enforce fees on Uniswap).
- *      ETH is only accepted from allowed routers (refund). LP/token are pulled per call and forwarded to msg.sender.
+ * @notice Add/remove liquidity for TCGV/USDC pool on multiple DEXes (e.g. PancakeSwap, Uniswap) without redeploying. Per-router config: fee-exempt (no TCGV fees on LP moves) or fees enforced.
+ * @dev For each router, owner sets allowed and whether to set token transient fee-exempt. When fee-exempt, TCGV does not charge fees on add/remove liquidity (whitepaper). User supplies both TCGV and quote token (e.g. USDC).
  */
 contract TCGVaultLiquidityWrapper is Ownable {
-    /// @notice Routers that can be used for add/remove liquidity and that may send ETH refunds to this contract.
+    /// @notice The TCGV token for which transient fee-exempt can be toggled.
+    address public immutable tcgvToken;
+    /// @notice Routers that can be used for add/remove liquidity.
     mapping(address => bool) private _allowedRouters;
-    /// @notice When true, token.setTransientFeeExempt(1) is used around the router call (no fees). When false, fees apply.
+    /// @notice When true, token.setTransientFeeExempt(true) is used around the router call (no fees). When false, fees apply.
     mapping(address => bool) private _feeExemptForRouter;
 
     // External getters (private/external pattern)
@@ -38,8 +35,11 @@ contract TCGVaultLiquidityWrapper is Ownable {
         return _feeExemptForRouter[router];
     }
 
+    /// @param tcgvToken_ The TCGV token address (must match tokenA in add/remove liquidity).
     /// @param initialRouter Optional. If non-zero, set as allowed and fee-exempt for backward compatibility.
-    constructor(address initialRouter) Ownable(msg.sender) {
+    constructor(address tcgvToken_, address initialRouter) Ownable(msg.sender) {
+        if (tcgvToken_ == address(0)) revert();
+        tcgvToken = tcgvToken_;
         if (initialRouter != address(0)) {
             _allowedRouters[initialRouter] = true;
             _feeExemptForRouter[initialRouter] = true;
@@ -54,70 +54,74 @@ contract TCGVaultLiquidityWrapper is Ownable {
         _feeExemptForRouter[router] = exempt;
     }
 
-    function addLiquidityETH(
+    /// @notice Add liquidity to TCGV/tokenB pool (e.g. TCGV/USDC). Caller must approve this contract for both tokens.
+    function addLiquidity(
         address router,
-        address token,
-        uint256 amountTokenDesired,
-        uint256 amountTokenMin,
-        uint256 amountETHMin,
+        address tokenB,
+        uint256 amountADesired,
+        uint256 amountBDesired,
+        uint256 amountAMin,
+        uint256 amountBMin,
         uint256 deadline
-    ) external payable returns (uint256 amountToken, uint256 amountETH, uint256 liquidity) {
+    ) external returns (uint256 amountA, uint256 amountB, uint256 liquidity) {
         if (!_allowedRouters[router]) revert RouterNotAllowed();
-        IERC20(token).transferFrom(msg.sender, address(this), amountTokenDesired);
-        IERC20(token).approve(router, amountTokenDesired);
-        if (_feeExemptForRouter[router]) {
-            ITransientFeeExemptToken(token).setTransientFeeExempt(1);
+        IERC20(tcgvToken).transferFrom(msg.sender, address(this), amountADesired);
+        IERC20(tokenB).transferFrom(msg.sender, address(this), amountBDesired);
+        IERC20(tcgvToken).approve(router, amountADesired);
+        IERC20(tokenB).approve(router, amountBDesired);
+        bool isFeeExempt = _feeExemptForRouter[router];
+        if (isFeeExempt) {
+            ITransientFeeExemptToken(tcgvToken).setTransientFeeExempt(true);
         }
-        (amountToken, amountETH, liquidity) = IRouter(router).addLiquidityETH{value: msg.value}(
-            token,
-            amountTokenDesired,
-            amountTokenMin,
-            amountETHMin,
+        (amountA, amountB, liquidity) = IRouter(router).addLiquidity(
+            tcgvToken,
+            tokenB,
+            amountADesired,
+            amountBDesired,
+            amountAMin,
+            amountBMin,
             msg.sender,
             deadline
         );
-        if (_feeExemptForRouter[router]) {
-            ITransientFeeExemptToken(token).setTransientFeeExempt(0);
+        if (isFeeExempt) {
+            ITransientFeeExemptToken(tcgvToken).setTransientFeeExempt(false);
         }
-        if (amountToken < amountTokenDesired) {
-            IERC20(token).transfer(msg.sender, amountTokenDesired - amountToken);
+        if (amountA < amountADesired) {
+            IERC20(tcgvToken).transfer(msg.sender, amountADesired - amountA);
         }
-        if (address(this).balance > 0) {
-            (bool ok,) = msg.sender.call{value: address(this).balance}("");
-            if (!ok) revert RefundETHFailed();
+        if (amountB < amountBDesired) {
+            IERC20(tokenB).transfer(msg.sender, amountBDesired - amountB);
         }
     }
 
-    /// @notice Only accepts ETH from an allowed router (excess ETH refund from addLiquidity).
-    receive() external payable {
-        if (!_allowedRouters[msg.sender]) revert OnlyAllowedRouterCanSendETH();
-    }
-
-    function removeLiquidityETH(
+    /// @notice Remove liquidity from TCGV/tokenB pool. Caller must approve this contract for the LP token.
+    function removeLiquidity(
         address router,
-        address token,
+        address tokenB,
         address lpToken,
         uint256 liquidity,
-        uint256 amountTokenMin,
-        uint256 amountETHMin,
+        uint256 amountAMin,
+        uint256 amountBMin,
         uint256 deadline
-    ) external returns (uint256 amountToken, uint256 amountETH) {
+    ) external returns (uint256 amountA, uint256 amountB) {
         if (!_allowedRouters[router]) revert RouterNotAllowed();
         IERC20(lpToken).transferFrom(msg.sender, address(this), liquidity);
         IERC20(lpToken).approve(router, liquidity);
-        if (_feeExemptForRouter[router]) {
-            ITransientFeeExemptToken(token).setTransientFeeExempt(1);
+        bool isFeeExempt = _feeExemptForRouter[router];
+        if (isFeeExempt) {
+            ITransientFeeExemptToken(tcgvToken).setTransientFeeExempt(true);
         }
-        (amountToken, amountETH) = IRouter(router).removeLiquidityETH(
-            token,
+        (amountA, amountB) = IRouter(router).removeLiquidity(
+            tcgvToken,
+            tokenB,
             liquidity,
-            amountTokenMin,
-            amountETHMin,
+            amountAMin,
+            amountBMin,
             msg.sender,
             deadline
         );
-        if (_feeExemptForRouter[router]) {
-            ITransientFeeExemptToken(token).setTransientFeeExempt(0);
+        if (isFeeExempt) {
+            ITransientFeeExemptToken(tcgvToken).setTransientFeeExempt(false);
         }
     }
 }

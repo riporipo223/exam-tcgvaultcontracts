@@ -29,11 +29,19 @@ error PresaleFinalizerAlreadySet();
 error AllocationRecipientsNotSet();
 /// @notice Fee recipient address cannot be zero.
 error ZeroAddress();
+/// @notice No team vesting amount available to claim.
+error NoTeamVestingToClaim();
+/// @notice No ops vesting amount available to claim.
+error NoOpsVestingToClaim();
+/// @notice Address is blacklisted (fraud, market manipulation, Sybil).
+error Blacklisted();
+/// @notice Contract is paused for security emergency.
+error ContractPaused();
 
 /**
  * @title TCGVaultToken (TCGV)
  * @notice Token A — le Moteur économique (whitepaper §4). BNB Chain, 1 milliard supply.
- * @dev Initial allocation (whitepaper §5): 60% Presale, 20% Liquidité, 4% Vesting & Équipe, 5% Ops/Marketing immédiat, 11% Ops/Marketing vesting.
+ * @dev Initial allocation (whitepaper §5): 60% Presale, 20% Liquidité, 4% Team (12mo cliff + 24mo vesting), 16% Ops (5% immediate + 11% over 36mo vesting).
  * @dev Taxe achat 15% (10% Vault, 3% Marketing, 2% burn). Cashback NEXUS: 30% pendant les Vagues 1 et 2 (prévente), 10% en période standard (whitepaper §6).
  * @dev Taxe vente 10%.
  */
@@ -45,6 +53,10 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
     uint256 private constant CASHBACK_RATE = 1000; // 10%
     /// @notice Presale cashback (Vagues 1 et 2). Whitepaper §6: BONUS PIONNIER 30% — immutable.
     uint256 private constant CASHBACK_RATE_PRESALE = 3000; // 30%
+    /// @notice Seconds per month for vesting (30 days).
+    uint256 private constant SECONDS_PER_MONTH = 30 * 24 * 3600;
+    /// @dev Transient storage slot for liquidity wrapper: when set, add/remove liquidity transfers are exempt from fees (EIP-1153).
+    uint256 private constant FEE_EXEMPT_SLOT = 0;
     /// @notice When true, cashback uses 30%; when false (after presale finalize), uses 10%. Only set when presale finalizer calls finalizePresaleAndRecompute().
     bool public presaleActive = true;
 
@@ -59,7 +71,7 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
     uint256 public SELL_MARKETING_SHARE = 1000; // 1% of total = 10% of 10%
     uint256 public SELL_COMMUNITY_SHARE = 1000; // 1% of total = 10% of 10%
     uint256 public SELL_BURN_SHARE = 1000; // 1% of total = 10% of 10%
-
+    
     // Addresses
     address public pancakeRouter;
     address public pancakeFactory;
@@ -74,12 +86,24 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
     address public liquidityWrapper;
     /// @notice Only this address can call finalizePresaleAndRecompute() and mintPresale(). Set to launch contract (e.g. TCGVaultInitialLaunch).
     address public presaleFinalizer;
-    /// @notice True after recomputeSupplyAndBurn has been called (one-time; mints 20% liquidity, 15% team, 5% ops per whitepaper §5).
+    /// @notice True after recomputeSupplyAndBurn has been called (one-time; mints 20% liquidity, 4% team vesting, 5% ops direct, 11% ops vesting).
     bool public supplyRecomputed;
-    /// @notice Recipients for post-presale mint (whitepaper §5: 20% Liquidité, 15% Équipe, 5% Ops/Marketing). Set by owner before presale end.
+    /// @notice Recipients for post-presale mint (whitepaper §5: 20% liquidity, 4% team vesting, 16% ops). Set by owner before presale end.
     address public liquidityRecipient;
     address public teamRecipient;
     address public opsRecipient;
+
+    // Team vesting: 4% of final supply; 12-month freeze, then 24 monthly claims (full 4% by month 36).
+    uint256 public teamVestingTotal;
+    uint256 public teamVestingClaimed;
+    uint256 public teamVestingCliffEnd; // timestamp after which vesting starts
+    uint256 public teamVestingEnd;      // timestamp when full amount is vested
+
+    // Ops vesting: 11% of final supply; no freeze, 36 monthly unlocks (full 11% by month 36). 5% is sent directly at finalize.
+    uint256 public opsVestingTotal;
+    uint256 public opsVestingClaimed;
+    uint256 public opsVestingStart;
+    uint256 public opsVestingEnd;
 
     // State variables
     bool public feesEnabled = true;
@@ -92,6 +116,10 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
     mapping(address => bool) public isPair;
     /// @notice Accumulated sell-fee autolp tokens; add to LP via executePendingAutolp() to avoid updating pair reserves during sell transfer (fixes router INSUFFICIENT_INPUT_AMOUNT).
     uint256 public pendingAutolp;
+    /// @notice Blacklist: when true, address cannot send nor receive TCGV (fraud, market manipulation, Sybil).
+    mapping(address => bool) public isBlacklisted;
+    /// @notice When true, all transfers (and thus buy/sell/mint via _update) are blocked for security emergency.
+    bool public paused;
 
     // Events
     event FeesDistributed(
@@ -113,8 +141,13 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
         uint256 burnShareBp
     );
     event PresaleFinalized();
-    event SupplyRecomputed(uint256 presaleSold, uint256 finalTotalSupply, uint256 mintedLiquidity, uint256 mintedTeam, uint256 mintedOps);
+    event SupplyRecomputed(uint256 presaleSold, uint256 finalTotalSupply, uint256 mintedLiquidity, uint256 mintedTeamVesting, uint256 mintedOpsDirect, uint256 mintedOpsVesting);
+    event TeamVestingClaimed(address indexed recipient, uint256 amount);
+    event OpsVestingClaimed(address indexed recipient, uint256 amount);
     event PendingAutolpExecuted(uint256 amount);
+    event BlacklistUpdated(address indexed account, bool status);
+    event Paused(address account);
+    event Unpaused(address account);
 
     /// @notice Whitepaper §4.1: TCG-VAULT Token, TCGV, 1 milliard supply, BNB Chain.
     constructor(
@@ -143,7 +176,7 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
         minBuyAmount = 10_000;
         minSellAmount = 10_000;
 
-        // No initial mint. Supply is minted during presale (mintPresale by launch contract) and at presale end (recomputeSupplyAndBurn mints 20% liquidity, 15% team, 5% ops — whitepaper §5).
+        // No initial mint. Supply is minted during presale (mintPresale by launch contract) and at presale end (finalizePresaleAndRecompute mints 20% liquidity, 4% team vesting, 5% ops direct, 11% ops vesting — whitepaper §5).
     }
 
     /**
@@ -172,13 +205,13 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Set transient fee-exempt flag (EIP-1153). Only callable by liquidityWrapper. Wrapper must call with 1 before add/remove liquidity and 0 after, so _update sees the flag in the same tx.
+     * @notice Set transient fee-exempt flag (EIP-1153). Only callable by liquidityWrapper. Wrapper must call with true before add/remove liquidity and false after, so _update sees the flag in the same tx.
      * @dev Transient storage is per-contract: only this contract's tstore is visible in this contract's tload. The wrapper cannot set our slot from its contract; it must call this.
      */
-    function setTransientFeeExempt(uint256 value) external {
+    function setTransientFeeExempt(bool exempt) external {
         if (msg.sender != liquidityWrapper) revert OnlyLiquidityWrapper();
         assembly {
-            tstore(0, value)
+            tstore(FEE_EXEMPT_SLOT, exempt)
         }
     }
 
@@ -227,6 +260,37 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
     function setMinAmounts(uint256 _minBuyAmount, uint256 _minSellAmount) external onlyOwner {
         minBuyAmount = _minBuyAmount;
         minSellAmount = _minSellAmount;
+    }
+
+    /**
+     * @notice Blacklist an address (fraud, market manipulation, Sybil). Blacklisted addresses cannot send nor receive TCGV.
+     */
+    function setBlacklisted(address account, bool status) external onlyOwner {
+        isBlacklisted[account] = status;
+        emit BlacklistUpdated(account, status);
+    }
+
+    /**
+     * @notice Pause all transfers (emergency security). When paused, buy/sell/transfer/mintPresale (via _update) are blocked.
+     */
+    function pause() external onlyOwner {
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    /**
+     * @notice Unpause the contract.
+     */
+    function unpause() external onlyOwner {
+        paused = false;
+        emit Unpaused(msg.sender);
+    }
+
+    /**
+     * @notice Set presale active flag (e.g. emergency cancel presale). When set to false, finalizePresaleAndRecompute will revert PresaleNotFinalized until presale is finalized normally.
+     */
+    function setPresaleActive(bool _active) external onlyOwner {
+        presaleActive = _active;
     }
 
     /**
@@ -289,7 +353,7 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Set recipients for post-presale mint (whitepaper §5: 20% liquidity, 15% team, 5% ops). Must be set before recomputeSupplyAndBurn().
+     * @notice Set recipients for post-presale mint (whitepaper §5: 20% liquidity, 4% team vesting, 16% ops). Must be set before finalizePresaleAndRecompute().
      */
     function setAllocationRecipients(address _liquidity, address _team, address _ops) external onlyOwner {
         liquidityRecipient = _liquidity;
@@ -303,13 +367,14 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
      */
     function mintPresale(address to, uint256 amount) external {
         if (msg.sender != presaleFinalizer) revert OnlyPresaleFinalizer();
-        if (to == address(0) || amount == 0) return;
+        if (to == address(0)) return;
+        if (amount == 0) return;
         _mint(to, amount);
     }
 
     /**
      * @notice Finalize presale and recompute supply in a single call.
-     * @dev Only callable by presaleFinalizer (e.g. InitialLaunch.finalize). Switches cashback from 30% to 10%, then mints 20%/15%/5% per whitepaper §5. Called once at presale end (mintPresale is per-buy).
+     * @dev Only callable by presaleFinalizer (e.g. InitialLaunch.finalize). Switches cashback from 30% to 10%, then mints: 20% liquidity (direct), 4% team (vesting: 12mo cliff + 24mo monthly), 5% ops (direct), 11% ops (vesting: 36mo monthly, no cliff). Called once at presale end.
      */
     function finalizePresaleAndRecompute() external {
         if (msg.sender != presaleFinalizer) revert OnlyPresaleFinalizer();
@@ -321,34 +386,101 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
         presaleActive = false;
         emit PresaleFinalized();
 
-        // Recompute supply and mint allocations
         uint256 presaleSold = ITCGVaultInitialLaunch(presaleFinalizer).totalTCGVAllocated();
         supplyRecomputed = true;
 
         if (presaleSold == 0) {
-            emit SupplyRecomputed(0, 0, 0, 0, 0);
+            emit SupplyRecomputed(0, 0, 0, 0, 0, 0);
             return;
         }
 
         uint256 finalSupply = (presaleSold * 10000) / 6000;
         uint256 currentSupply = totalSupply();
-
         uint256 toMint = finalSupply - currentSupply;
-        uint256 liquidityAmount = (finalSupply * 2000) / 10000; // 20%
-        uint256 teamAmount = (finalSupply * 1500) / 10000;      // 15%
-        uint256 opsAmount = (finalSupply * 500) / 10000;         // 5%
-        uint256 sum = liquidityAmount + teamAmount + opsAmount;
+
+        // 20% liquidity, 4% team vesting, 5% ops direct, 11% ops vesting = 40%
+        uint256 liquidityAmount = (finalSupply * 2000) / 10000;   // 20%
+        uint256 teamVestingAmount = (finalSupply * 400) / 10000;  // 4%
+        uint256 opsDirectAmount = (finalSupply * 500) / 10000;    // 5%
+        uint256 opsVestingAmount = (finalSupply * 1100) / 10000;   // 11%
+        uint256 sum = liquidityAmount + teamVestingAmount + opsDirectAmount + opsVestingAmount;
+
         if (sum > toMint && sum > 0) {
             liquidityAmount = (liquidityAmount * toMint) / sum;
-            teamAmount = (teamAmount * toMint) / sum;
-            opsAmount = toMint - liquidityAmount - teamAmount;
+            teamVestingAmount = (teamVestingAmount * toMint) / sum;
+            opsDirectAmount = (opsDirectAmount * toMint) / sum;
+            opsVestingAmount = toMint - liquidityAmount - teamVestingAmount - opsDirectAmount;
         }
 
         if (liquidityAmount > 0) _mint(liquidityRecipient, liquidityAmount);
-        if (teamAmount > 0) _mint(teamRecipient, teamAmount);
-        if (opsAmount > 0) _mint(opsRecipient, opsAmount);
+        if (opsDirectAmount > 0) _mint(opsRecipient, opsDirectAmount);
 
-        emit SupplyRecomputed(presaleSold, finalSupply, liquidityAmount, teamAmount, opsAmount);
+        uint256 t = block.timestamp;
+        if (teamVestingAmount > 0) {
+            _mint(address(this), teamVestingAmount);
+            teamVestingTotal = teamVestingAmount;
+            teamVestingCliffEnd = t + 12 * SECONDS_PER_MONTH;
+            teamVestingEnd = t + 36 * SECONDS_PER_MONTH; // 12mo cliff + 24mo vesting
+        }
+        if (opsVestingAmount > 0) {
+            _mint(address(this), opsVestingAmount);
+            opsVestingTotal = opsVestingAmount;
+            opsVestingStart = t;
+            opsVestingEnd = t + 36 * SECONDS_PER_MONTH;
+        }
+
+        emit SupplyRecomputed(presaleSold, finalSupply, liquidityAmount, teamVestingAmount, opsDirectAmount, opsVestingAmount);
+    }
+
+    /**
+     * @notice Claim available team vesting. 4% of final supply: 12-month freeze, then linear vest over 24 months. Callable by anyone; tokens sent to teamRecipient.
+     */
+    function claimTeam() external nonReentrant {
+        uint256 claimable = _teamVestingClaimable();
+        if (claimable == 0) revert NoTeamVestingToClaim();
+        teamVestingClaimed += claimable;
+        super._update(address(this), teamRecipient, claimable);
+        emit TeamVestingClaimed(teamRecipient, claimable);
+    }
+
+    /**
+     * @notice Claim available ops vesting. 11% of final supply: linear vest over 36 months (no freeze). Callable by anyone; tokens sent to opsRecipient.
+     */
+    function claimOps() external nonReentrant {
+        uint256 claimable = _opsVestingClaimable();
+        if (claimable == 0) revert NoOpsVestingToClaim();
+        opsVestingClaimed += claimable;
+        super._update(address(this), opsRecipient, claimable);
+        emit OpsVestingClaimed(opsRecipient, claimable);
+    }
+
+    /// @dev Returns claimable team vesting amount (linear from cliff end to teamVestingEnd).
+    function _teamVestingClaimable() private view returns (uint256) {
+        if (teamVestingTotal == 0 || block.timestamp < teamVestingCliffEnd) return 0;
+        uint256 vestDuration = teamVestingEnd - teamVestingCliffEnd;
+        uint256 elapsed = block.timestamp > teamVestingEnd ? vestDuration : (block.timestamp - teamVestingCliffEnd);
+        uint256 vested = (teamVestingTotal * elapsed) / vestDuration;
+        return vested > teamVestingClaimed ? vested - teamVestingClaimed : 0;
+    }
+
+    /// @dev Returns claimable ops vesting amount (linear from opsVestingStart to opsVestingEnd).
+    function _opsVestingClaimable() private view returns (uint256) {
+        if (opsVestingTotal == 0 || block.timestamp <= opsVestingStart) return 0;
+        uint256 vestDuration = opsVestingEnd - opsVestingStart;
+        uint256 elapsed = block.timestamp >= opsVestingEnd ? vestDuration : (block.timestamp - opsVestingStart);
+        uint256 vested = (opsVestingTotal * elapsed) / vestDuration;
+        if (vested > opsVestingClaimed) return vested - opsVestingClaimed;
+        return 0;
+    }
+
+    /// @notice View: claimable team vesting amount (for teamRecipient).
+    function teamVestingClaimable() external view returns (uint256) {
+        return _teamVestingClaimable();
+    }
+
+    /// @notice View: claimable ops vesting amount (for opsRecipient).
+    function opsVestingClaimable() external view returns (uint256) {
+        return _opsVestingClaimable();
     }
 
     /// @notice Effective cashback rate: 30% during presale (Vagues 1 et 2), 10% in standard period (whitepaper §6). Rates are constants.
@@ -388,9 +520,6 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
         _burn(msg.sender, amount);
     }
 
-    /// @dev Transient storage slot for liquidity wrapper: when set, add/remove liquidity transfers are exempt from fees (EIP-1153).
-    uint256 private constant FEE_EXEMPT_SLOT = 0;
-
     /**
      * @notice Override transfer to apply fees
      * @dev Detects buys (from pair) and sells (to pair). Skips fees when FEE_EXEMPT_SLOT is set (liquidity add/remove via wrapper).
@@ -400,6 +529,8 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
             super._update(from, to, 0);
             return;
         }
+        if (paused) revert ContractPaused();
+        if (isBlacklisted[from] || isBlacklisted[to]) revert Blacklisted();
 
         // Skip fees when liquidity wrapper set transient storage (add/remove liquidity)
         uint256 exempt;
@@ -442,7 +573,7 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
         // Pair sends full amount to buyer; then buyer pays fees to vault/marketing/burn.
         super._update(from, to, amount);
         if (feeAmount > 0) _distributeBuyFeesFrom(to, feeAmount);
-        if (cashbackEnabled && nexusToken != address(0)) _distributeCashback(to, amount);
+        _distributeCashback(to, amount);
     }
 
     /**
@@ -495,8 +626,8 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
      * @notice Distribute cashback in TCGNexus tokens (30% presale, 10% standard). Reverts if mint fails.
      */
     function _distributeCashback(address recipient, uint256 purchaseAmount) private {
-        if (nexusToken == address(0) || !cashbackEnabled || recipient == address(0)) return;
-
+        if (nexusToken == address(0)) return;
+        if (!cashbackEnabled) return;
         uint256 cashbackAmount = (purchaseAmount * getCashbackRate()) / 10000;
         if (cashbackAmount == 0) return;
 

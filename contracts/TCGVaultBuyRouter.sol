@@ -4,47 +4,42 @@ pragma solidity ^0.8.27;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "./interfaces/ITCGVaultToken.sol";
+import "./interfaces/ITCGRToken.sol";
 import "./interfaces/IPancakeV2.sol";
 
-/// @notice Sent when buying with zero BNB.
-error ZeroBNB();
+/// @notice Sent when buying with zero USDC.
+error ZeroUSDC();
 /// @notice Sent when selling with zero TCGV.
 error ZeroTCGV();
-/// @notice BNB transfer to vault failed.
+/// @notice USDC transfer to vault failed.
 error VaultTransferFailed();
-/// @notice BNB transfer to marketing failed.
+/// @notice USDC transfer to marketing failed.
 error MarketingTransferFailed();
-/// @notice BNB transfer to community failed.
+/// @notice USDC transfer to community failed.
 error CommunityTransferFailed();
-/// @notice BNB transfer to burn address failed.
-error BurnTransferFailed();
 /// @notice No TCGV received from swap.
 error NoTCGVReceived();
-/// @notice Use buyTCGVWithBNB to send BNB.
-error UseBuyTCGVWithBNB();
-/// @notice Invalid path - first token must be WETH.
-error InvalidPath();
 /// @notice Output amount is less than minimum required.
 error InsufficientOutputAmount();
 /// @notice Transaction deadline has passed.
 error Expired();
-/// @notice BNB transfer to user failed.
-error UserTransferFailed();
-/// @notice Router retained BNB or sweep failed.
-error SweepFailed();
 /// @notice Vault, marketing, and community must be non-zero (immutable).
 error ZeroAddress();
 
 /**
  * @title TCGVaultBuyRouter
- * @notice Buy TCGV with BNB: BNB fee 13% (10% vault, 3% marketing), then swap for TCGV; 2% of TCGV burned. User receives rest + NEXUS cashback (30% presale, 10% standard — whitepaper §6).
+ * @notice Buy and sell TCGV against USDC (stablecoin). Buy: USDC fee 13% (10% vault, 3% marketing), then swap remaining USDC for TCGV; 2% of TCGV burned. User receives rest + NEXUS cashback (30% presale, 10% standard — whitepaper §6).
+ *         Referral: 0,5 % en $TCGR au profit du parrain (achats via routeur uniquement, CGU).
  * @dev This contract is excluded from fees in TCGVaultToken. Cashback rate is determined by TCGVaultToken (presaleActive).
  */
 contract TCGVaultBuyRouter is Ownable {
+    /// @notice 0.5% of USDC value (scaled to 18 decimals) minted as TCGR to referrer for each validated buy.
+    uint256 public constant REFERRAL_BP = 50;
+
     // Fee params (basis points) — defaults reflect current behavior, but are owner-modifiable.
-    // Buy: BNB fee split + TCGV burn on output
-    uint256 private _buyVaultBp = 1000; // 10% of BNB
-    uint256 private _buyMarketingBp = 300; // 3% of BNB
+    // Buy: USDC fee split + TCGV burn on output
+    uint256 private _buyVaultBp = 1000; // 10% of USDC in
+    uint256 private _buyMarketingBp = 300; // 3% of USDC in
     uint256 private _buyCommunityBp = 0; // 0% by default
     uint256 private _buyTcgvBurnBp = 200; // 2% of TCGV received is burned
 
@@ -59,13 +54,15 @@ contract TCGVaultBuyRouter is Ownable {
     address private immutable _router;
     address private immutable _factory;
     ITCGVaultToken private immutable _tcgv;
-    address private immutable _weth;
+    IERC20 private immutable _usdc;
     address private immutable _vault;
     address private immutable _marketing;
     address private immutable _community;
+    ITCGRToken private _referralToken;
 
-    event BuyWithBNB(address indexed buyer, uint256 bnbIn, uint256 feeBNB, uint256 tcgvOut);
-    event SellTCGVForBNB(address indexed seller, uint256 tcgvIn, uint256 feeTCGV, uint256 bnbOut);
+    event BuyWithUSDC(address indexed buyer, address indexed referrer, uint256 usdcIn, uint256 feeUSDC, uint256 tcgvOut);
+    event ReferralTokenSet(address indexed token);
+    event SellTCGVForUSDC(address indexed seller, uint256 tcgvIn, uint256 feeTCGV, uint256 usdcOut);
     event BuyFeeParamsUpdated(uint256 vaultBp, uint256 marketingBp, uint256 communityBp, uint256 tcgvBurnBp);
     event SellFeeParamsUpdated(
         uint256 taxBp,
@@ -76,22 +73,15 @@ contract TCGVaultBuyRouter is Ownable {
         uint256 burnShareBp
     );
 
-    struct SellFeeDistribution {
-        uint256 vaultAmount;
-        uint256 autolpAmount;
-        uint256 marketingAmount;
-        uint256 communityAmount;
-        uint256 burnAmount;
-    }
-
     // External getters (private/external pattern)
     function router() external view returns (address) { return _router; }
     function factory() external view returns (address) { return _factory; }
     function tcgv() external view returns (address) { return address(_tcgv); }
-    function weth() external view returns (address) { return _weth; }
+    function usdc() external view returns (address) { return address(_usdc); }
     function vault() external view returns (address) { return _vault; }
     function marketing() external view returns (address) { return _marketing; }
     function community() external view returns (address) { return _community; }
+    function referralToken() external view returns (address) { return address(_referralToken); }
 
     function buyVaultBp() external view returns (uint256) { return _buyVaultBp; }
     function buyMarketingBp() external view returns (uint256) { return _buyMarketingBp; }
@@ -107,6 +97,7 @@ contract TCGVaultBuyRouter is Ownable {
 
     constructor(
         address router_,
+        address usdc_,
         ITCGVaultToken tcgv_,
         address vault_,
         address marketing_,
@@ -116,7 +107,7 @@ contract TCGVaultBuyRouter is Ownable {
         _router = router_;
         _factory = IPancakeRouter02(router_).factory();
         _tcgv = tcgv_;
-        _weth = IPancakeRouter02(router_).WETH();
+        _usdc = IERC20(usdc_);
         _vault = vault_;
         _marketing = marketing_;
         _community = community_;
@@ -126,6 +117,14 @@ contract TCGVaultBuyRouter is Ownable {
      * @notice Update buy fee parameters (router mode).
      * @dev `vaultBp + marketingBp + communityBp` is taken from msg.value before swap. `tcgvBurnBp` is burned from received TCGV.
      */
+    /**
+     * @notice Set the TCGR referral token. Only this router can mint referral rewards.
+     */
+    function setReferralToken(address token_) external onlyOwner {
+        _referralToken = ITCGRToken(token_);
+        emit ReferralTokenSet(token_);
+    }
+
     function setBuyFeeParams(
         uint256 vaultBp,
         uint256 marketingBp,
@@ -164,14 +163,6 @@ contract TCGVaultBuyRouter is Ownable {
         _sellCommunityShareBp = communityShareBp;
         _sellBurnShareBp = burnShareBp;
         emit SellFeeParamsUpdated(taxBp, vaultShareBp, autolpShareBp, marketingShareBp, communityShareBp, burnShareBp);
-    }
-
-    function _sweepBNB(address recipient) private {
-        uint256 bal = address(this).balance;
-        if (bal == 0) return;
-        address to = recipient == address(0) ? msg.sender : recipient;
-        (bool ok,) = payable(to).call{value: bal}("");
-        if (!ok) revert SweepFailed();
     }
 
     /**
@@ -221,9 +212,8 @@ contract TCGVaultBuyRouter is Ownable {
                 // _getReserves(input, output) returns (reserve of input, reserve of output)
                 (uint256 reserveInput, uint256 reserveOutput) = _getReserves(input, output);
                 amountInput = IERC20(input).balanceOf(address(pair)) - reserveInput;
+                // Match PancakeSwap's getAmountOut behavior exactly (no extra buffer).
                 amountOutput = _getAmountOut(amountInput, reserveInput, reserveOutput);
-                // Apply 3% slippage so pair's K check never reverts (BSC pair fee/rounding can differ from our 9975/10000)
-                amountOutput = (amountOutput * 9700) / 10000;
             }
             // amount0Out/amount1Out are in pair's token0/token1 order
             (uint256 amount0Out, uint256 amount1Out) = input == token0 ? (uint256(0), amountOutput) : (amountOutput, uint256(0));
@@ -233,42 +223,49 @@ contract TCGVaultBuyRouter is Ownable {
     }
 
     /**
-     * @notice Buy TCGV with BNB. 13% BNB fee to vault (10%) + marketing (3%); rest swapped for TCGV. 2% of TCGV received is burned. You get rest + 10% NEXUS cashback.
+     * @notice Buy TCGV with USDC. 13% USDC fee to vault (10%) + marketing (3%); rest swapped for TCGV. 2% of TCGV received is burned. You get rest + NEXUS cashback.
+     *         If referrer is set (and not self), 0.5% of USDC value is minted as TCGR to the referrer (routeur uniquement, CGU).
+     * @param usdcAmount Amount of USDC to spend (must be approved to this router).
+     * @param amountOutMin Minimum TCGV to receive.
+     * @param deadline Swap deadline.
+     * @param referrer Parrain (ambassadeur) — receives 0.5% in TCGR; pass address(0) if none.
      */
-    function buyTCGVWithBNB(uint256 amountOutMin, uint256 deadline) external payable {
-        if (msg.value == 0) revert ZeroBNB();
+    function buyTCGVWithUSDC(uint256 usdcAmount, uint256 amountOutMin, uint256 deadline, address referrer) external {
+        if (usdcAmount == 0) revert ZeroUSDC();
         if (deadline < block.timestamp) revert Expired();
 
-        uint256 vaultBNB = (msg.value * _buyVaultBp) / 10000;
-        uint256 marketingBNB = (msg.value * _buyMarketingBp) / 10000;
-        uint256 communityBNB = (msg.value * _buyCommunityBp) / 10000;
-        uint256 feeBNB = vaultBNB + marketingBNB + communityBNB;
-        uint256 swapAmount = msg.value - feeBNB;
+        (uint256 tcgvToUser, uint256 feeUSDC) = _buyWithUSDC(usdcAmount, amountOutMin);
 
-        if (vaultBNB > 0) {
-            (bool ok,) = payable(_vault).call{value: vaultBNB}("");
-            if (!ok) revert VaultTransferFailed();
-        }
-        if (marketingBNB > 0) {
-            (bool ok,) = payable(_marketing).call{value: marketingBNB}("");
-            if (!ok) revert MarketingTransferFailed();
-        }
-        if (communityBNB > 0) {
-            (bool ok,) = payable(_community).call{value: communityBNB}("");
-            if (!ok) revert CommunityTransferFailed();
-        }
+        _handleReferral(msg.sender, referrer, usdcAmount);
 
-        // Build path [WETH, TCGV]
+        emit BuyWithUSDC(msg.sender, referrer, usdcAmount, feeUSDC, tcgvToUser);
+    }
+
+    /**
+     * @notice Internal helper for buying TCGV with USDC: pulls USDC, applies fees, swaps for TCGV and sends it to buyer.
+     */
+    function _buyWithUSDC(uint256 usdcAmount, uint256 amountOutMin) private returns (uint256 tcgvToUser, uint256 feeUSDC) {
+        // Pull USDC from user (reverts on failure)
+        _usdc.transferFrom(msg.sender, address(this), usdcAmount);
+
+        uint256 vaultUSDC = (usdcAmount * _buyVaultBp) / 10000;
+        uint256 marketingUSDC = (usdcAmount * _buyMarketingBp) / 10000;
+        uint256 communityUSDC = (usdcAmount * _buyCommunityBp) / 10000;
+        feeUSDC = vaultUSDC + marketingUSDC + communityUSDC;
+        uint256 swapAmount = usdcAmount - feeUSDC;
+
+        if (vaultUSDC > 0) _usdc.transfer(_vault, vaultUSDC);
+        if (marketingUSDC > 0) _usdc.transfer(_marketing, marketingUSDC);
+        if (communityUSDC > 0) _usdc.transfer(_community, communityUSDC);
+
+        // Build path [USDC, TCGV]
         address[] memory path = new address[](2);
-        path[0] = _weth;
+        path[0] = address(_usdc);
         path[1] = address(_tcgv);
 
-        // Deposit ETH to WETH
-        IWETH(_weth).deposit{value: swapAmount}();
-
-        // Get pair address and transfer WETH to pair
+        // Get pair address and transfer USDC to pair
         address pair = _pairFor(path[0], path[1]);
-        IWETH(_weth).transfer(pair, swapAmount);
+        _usdc.transfer(pair, swapAmount);
 
         // Record balance before swap
         uint256 balanceBefore = _tcgv.balanceOf(address(this));
@@ -287,105 +284,83 @@ contract TCGVaultBuyRouter is Ownable {
         if (burnAmount > 0) {
             _tcgv.burn(burnAmount);
         }
-        
+
         // Mint NEXUS cashback and transfer remaining TCGV to user
-        // This transfer (this→user) is not taxed because this contract is excluded from fees
-        uint256 tcgvToUser = tcgvReceived - burnAmount;
+        tcgvToUser = tcgvReceived - burnAmount;
         _tcgv.recordBuyAndMintCashback(msg.sender, tcgvReceived);
         _tcgv.transfer(msg.sender, tcgvToUser);
-        emit BuyWithBNB(msg.sender, msg.value, feeBNB, tcgvToUser);
-
-        _sweepBNB(_vault);
     }
 
     /**
-     * @notice Calculate sell fee distribution
+     * @notice Handle referral minting (0.5% of USDC value, scaled to 18 decimals).
      */
-    function _calculateSellFees(uint256 totalFee) private view returns (SellFeeDistribution memory fees) {
-        fees.vaultAmount = (totalFee * _sellVaultShareBp) / 10000;
-        fees.autolpAmount = (totalFee * _sellAutolpShareBp) / 10000;
-        fees.marketingAmount = (totalFee * _sellMarketingShareBp) / 10000;
-        fees.communityAmount = (totalFee * _sellCommunityShareBp) / 10000;
-        fees.burnAmount = (totalFee * _sellBurnShareBp) / 10000;
+    function _handleReferral(address buyer, address referrer, uint256 usdcAmount) private {
+        if (referrer == address(0) || referrer == buyer || address(_referralToken) == address(0)) return;
+        // usdcAmount has 6 decimals; scale to 18 to match TCGR decimals. mintReferral(0) is a no-op.
+        uint256 referralAmount = (usdcAmount * 1e12 * REFERRAL_BP) / 10000;
+        if (referralAmount == 0) return;
+        _referralToken.mintReferral(referrer, referralAmount);
     }
 
     /**
-     * @notice Distribute sell fees to recipients
+     * @notice Sell TCGV for USDC. Fee (10%) is taken in USDC after the swap: 4% vault, 3% autolp (sent to vault for manual LP add), 1% marketing, 1% community, 1% burn (in TCGV).
      */
-    function _distributeSellFees(SellFeeDistribution memory fees) private {
-        if (fees.vaultAmount > 0) _tcgv.transfer(_vault, fees.vaultAmount);
-        if (fees.marketingAmount > 0) _tcgv.transfer(_marketing, fees.marketingAmount);
-        if (fees.communityAmount > 0) _tcgv.transfer(_community, fees.communityAmount);
-        if (fees.burnAmount > 0) _tcgv.burn(fees.burnAmount);
-    }
-
-    /**
-     * @notice Sell TCGV for BNB. Fee (10%) is taken in TCGV: 4% vault, 3% autolp (sent to vault for manual LP add), 1% marketing, 1% community, 1% burn.
-     */
-    function sellTCGVForBNB(uint256 amountIn, uint256 amountOutMin, uint256 deadline) external {
+    function sellTCGVForUSDC(uint256 amountIn, uint256 amountOutMin, uint256 deadline) external {
         if (amountIn == 0) revert ZeroTCGV();
         if (deadline < block.timestamp) revert Expired();
 
         // Pull TCGV from user
         _tcgv.transferFrom(msg.sender, address(this), amountIn);
 
-        // Calculate sell fee and distribution
-        uint256 totalFee = (amountIn * _sellTaxBp) / 10000;
-        SellFeeDistribution memory fees = _calculateSellFees(totalFee);
-
-        // Distribute fees (except autolpAmount which is kept for liquidity)
-        _distributeSellFees(fees);
-
-        // Build path [TCGV, WETH]
-        address[] memory path = new address[](2);
-        path[0] = address(_tcgv);
-        path[1] = _weth;
-
-        // Get pair address and transfer TCGV to pair (amountIn minus fee)
-        address pair = _pairFor(path[0], path[1]);
-        _tcgv.transfer(pair, amountIn - totalFee);
-
-        // Execute swap and get WETH
-        uint256 wethReceived = _swapTCGVForWETH(path);
-        if (wethReceived == 0) revert InsufficientOutputAmount();
-
-        // Withdraw WETH to BNB; send autolp TCGV to vault for manual LP, user gets all BNB
-        uint256 userBnb = _processSellLiquidityAndPayment(fees.autolpAmount, wethReceived);
-        
-        // Verify minimum output and send BNB to user
-        if (userBnb < amountOutMin) revert InsufficientOutputAmount();
-        if (userBnb > 0) {
-            (bool ok,) = payable(msg.sender).call{value: userBnb}("");
-            if (!ok) revert UserTransferFailed();
+        // Burn TCGV portion according to sellBurnShare (the only TCGV-side fee); remainder is swapped for USDC.
+        uint256 burnAmount = (amountIn * _sellBurnShareBp) / 10000;
+        uint256 amountForSwap = amountIn - burnAmount;
+        if (burnAmount > 0) {
+            _tcgv.burn(burnAmount);
         }
 
-        emit SellTCGVForBNB(msg.sender, amountIn, totalFee, userBnb);
+        // Build path [TCGV, USDC]
+        address[] memory path = new address[](2);
+        path[0] = address(_tcgv);
+        path[1] = address(_usdc);
 
-        _sweepBNB(_vault);
-    }
+        // Get pair address and transfer TCGV to pair (amountIn minus burn)
+        address pair = _pairFor(path[0], path[1]);
+        _tcgv.transfer(pair, amountForSwap);
 
-    /**
-     * @notice Swap TCGV for WETH and return amount received
-     */
-    function _swapTCGVForWETH(address[] memory path) private returns (uint256 wethReceived) {
-        uint256 wethBalanceBefore = IWETH(_weth).balanceOf(address(this));
+        // Execute swap and get USDC
+        uint256 usdcBefore = _usdc.balanceOf(address(this));
         _swapSupportingFeeOnTransferTokens(path, address(this));
-        uint256 wethBalanceAfter = IWETH(_weth).balanceOf(address(this));
-        wethReceived = wethBalanceAfter - wethBalanceBefore;
-    }
+        uint256 usdcAfter = _usdc.balanceOf(address(this));
+        uint256 usdcReceived = usdcAfter - usdcBefore;
+        if (usdcReceived == 0) revert InsufficientOutputAmount();
 
-    /**
-     * @notice Send autolp TCGV to vault for manual liquidity add. User receives all BNB from the swap.
-     * @dev Whitepaper: autoliquidity LP is not added automatically per sell; vault adds liquidity manually (e.g. via TCGVaultLiquidityWrapper).
-     */
-    function _processSellLiquidityAndPayment(uint256 autolpAmount, uint256 wethReceived) private returns (uint256 userBnb) {
-        IWETH(_weth).withdraw(wethReceived);
-        userBnb = address(this).balance;
-        if (autolpAmount > 0) _tcgv.transfer(_vault, autolpAmount);
+        // Apply sell fee in USDC on the output: 10% total, split by shares.
+        uint256 feeUsdc = (usdcReceived * _sellTaxBp) / 10000;
+        uint256 userUsdc = usdcReceived - feeUsdc;
+
+        // Verify minimum output
+        if (userUsdc < amountOutMin) revert InsufficientOutputAmount();
+
+        // Split and transfer USDC fees
+        if (feeUsdc > 0) {
+            uint256 autolpUsdc = (feeUsdc * _sellAutolpShareBp) / 10000;
+            uint256 vaultUsdc = (feeUsdc * _sellVaultShareBp) / 10000;
+            uint256 marketingUsdc = (feeUsdc * _sellMarketingShareBp) / 10000;
+            uint256 communityUsdc = (feeUsdc * _sellCommunityShareBp) / 10000;
+
+            if (vaultUsdc > 0) _usdc.transfer(_vault, vaultUsdc);
+            if (autolpUsdc > 0) _usdc.transfer(_vault, autolpUsdc);
+            if (marketingUsdc > 0) _usdc.transfer(_marketing, marketingUsdc);
+            if (communityUsdc > 0) _usdc.transfer(_community, communityUsdc);
+        }
+
+        _usdc.transfer(msg.sender, userUsdc);
+
+        emit SellTCGVForUSDC(msg.sender, amountIn, feeUsdc, userUsdc);
     }
 
     error InvalidFeeParams();
 
-    /// @notice Accept BNB from WETH withdrawal and from user payments
-    receive() external payable {}
+    // No need to receive native BNB/ETH; all flows are in ERC20 tokens (USDC, TCGV).
 }

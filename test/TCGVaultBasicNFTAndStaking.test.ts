@@ -153,6 +153,20 @@ describe("TCGVaultBasicNFT + StakingVault", () => {
       );
     });
 
+    it("mintFor reverts OnlyStakingVault when caller is not staking vault", async () => {
+      await expectRevert(
+        basicNFT.write.mintFor([user1.account.address], { account: owner.account })
+      );
+    });
+
+    it("mintFor is no-op when account stake is below min (only staking vault can call)", async () => {
+      const mockStaking = await viem.deployContract("contracts/test/MockStakingForBasicNFT.sol:MockStakingForBasicNFT", [], { client: { wallet: owner } });
+      await basicNFT.write.setStakingVault([mockStaking.address], { account: owner.account });
+      const nextBefore = await basicNFT.read.nextTokenId();
+      await mockStaking.write.triggerMintFor([basicNFT.address, user2.account.address], { account: owner.account });
+      expect(await basicNFT.read.nextTokenId()).to.equal(nextBefore);
+      await basicNFT.write.setStakingVault([stakingVault.address], { account: owner.account });
+    });
 
     it("withdraw below min burns Basic NFT", async () => {
       const shares = (await stakingVault.read.balanceOf([user2.account.address]));

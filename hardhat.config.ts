@@ -5,7 +5,7 @@ import hardhatNodeTestRunner from "@nomicfoundation/hardhat-node-test-runner";
 import hardhatNetworkHelpers from "@nomicfoundation/hardhat-network-helpers";
 
 export default defineConfig({
-  // Coverage: run `yarn coverage`. Uses hardhat.coverage.config.ts (single compiler); fork-only contracts are temporarily excluded. Reports in coverage/ (lcov, HTML).
+  // Coverage: run `yarn coverage` (uses this config + --coverage; reports in coverage/ as lcov & HTML).
   plugins: [
     hardhatViem,
     hardhatViemAssertions,
@@ -13,12 +13,19 @@ export default defineConfig({
     hardhatNetworkHelpers,
   ],
   solidity: {
-    compilers: [
-      { version: "0.8.27", settings: { optimizer: { enabled: true }, evmVersion: "cancun" as const } },
-      { version: "0.6.6", settings: { optimizer: { enabled: true } } },
-      { version: "0.5.16", settings: { optimizer: { enabled: true } } },
-      { version: "0.4.18", settings: { optimizer: { enabled: true } } },
-    ],
+    // Coverage injects a library with pragma >=0.4.22; avoid 0.4.18 so it is not selected (use COVERAGE=1 + exclude WBNB).
+    compilers: process.env.COVERAGE
+      ? [
+          { version: "0.8.27", settings: { optimizer: { enabled: true }, evmVersion: "cancun" as const } },
+          { version: "0.6.6", settings: { optimizer: { enabled: true } } },
+          { version: "0.5.16", settings: { optimizer: { enabled: true } } },
+        ]
+      : [
+          { version: "0.8.27", settings: { optimizer: { enabled: true }, evmVersion: "cancun" as const } },
+          { version: "0.6.6", settings: { optimizer: { enabled: true } } },
+          { version: "0.5.16", settings: { optimizer: { enabled: true } } },
+          { version: "0.4.18", settings: { optimizer: { enabled: true } } },
+        ],
   },
   networks: {
     hardhat: {
@@ -33,7 +40,14 @@ export default defineConfig({
       chainType: "l1",
       url: "http://localhost:8545",
       chainId: 56,
-      accounts: "remote",
+      // Use Anvil's rich default account as deployer, and a dedicated
+      // EOA (no 7702 delegation code) as the trader/buyer.
+      accounts: [
+        // Anvil default account(0): 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        // Custom trader key provided for tests (no funds by default; script funds it from deployer).
+        "0x5a21e32ae37de592bb8187ae8b3788be2af7d50376607c05c2d4e47211acd1fe",
+      ],
     },
     mainnet: {
       type: "http",

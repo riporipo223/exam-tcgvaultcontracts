@@ -3,17 +3,16 @@ WARNING: You are using Node.js 25.6.1 which is not supported by Hardhat.
 Please upgrade to 22.10.0 or a later LTS version (even major version number)
 
 
-
 ================================================================================
 TCG Vault — End-to-end test on BSC fork
 ================================================================================
 Deployer (owner): 0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266
-Deployer BNB: 9999.999981896874506173
-Trader:         0x70997970c51812dc3a010c7d01b50e0d17dc79c8
-Trader BNB:   10000
-Vault:          0x312d27bd97c52615ee7609c463b5b6c3e80414d3
-Marketing:      0x315dbcc5065d44b3b16a98ffb882fb3fc24a047a
-Community:      0x0d9ede98345af8a1fa03e43e8fecce98d98e1421
+Deployer BNB: 9999.999979543135
+Trader:         0x4d6120a0e73b1c0e67d9db400bf0a0be8f5385f0
+Trader BNB:   0
+Vault:          0x72b02ecb81d60107dc1f3d46fd5cd2f1ef5e11a4
+Marketing:      0x3998a248f649142c865ca94e035b4a0c7bcdb74c
+Community:      0x17f38ab89496e10e34268bdc66ae48d50fb4a227
 
 PancakeSwap Router: 0x10ED43C718714eb63d5aA57B78B54704E256024E
 PancakeSwap Factory: 0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73
@@ -22,28 +21,28 @@ WBNB: 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c
 --- Phase 1: Deployment ---
 
 1.1 Deploying TCGVaultToken...
-    TCGVaultToken: 0x6e24Cebe742eB719Ffe272Ca69bC83fD48bf8E5d
+    TCGVaultToken: 0x707976FeF2CD9017f6Ed287B109Da05355B57B11
     Total supply:  0 TCGV
 
 1.2 Deploying TCGNexusToken...
-    TCGNexusToken: 0xd44b059795c8286Bfe4C43C552039cEEaE68E7cd
+    TCGNexusToken: 0xd719bD4382174555375b3D26854690ea2412Bbff
 
 1.3 Setting Nexus on TCGVaultToken...
     Nexus set.
 
 1.4 Deploying TCGVaultBuyRouter...
-    TCGVaultBuyRouter: 0x2da3b70a2e164a03fe8779c1e02a1f6caf28a951 (set as buy router)
+    TCGVaultBuyRouter: 0x4793a63fbc11d79bd72c362afa5a9c04bc55fb65 (set as buy router)
 
 1.5 Deploying TCGVaultLiquidityWrapper...
-    TCGVaultLiquidityWrapper: 0x70ba282c47bf1eb777dc552142288300f686b06a (set as liquidity wrapper, excluded from fees)
+    TCGVaultLiquidityWrapper: 0xff995b24cabe646c128503ed9504f0c01239bc4e (set as liquidity wrapper, excluded from fees)
 
 1.6 Presale finalizer and initial mint (no constructor mint)...
-    MockPresaleLaunch: 0x3be242cfb9112a58a77cfd29dc7bf83a5689a499; minted 1000000000 TCGV to deployer for liquidity & tests
+    MockPresaleLaunch: 0xa3a3e161b73ec6535927e7c77b901db80b100852; minted 1000000000 TCGV to deployer for liquidity & tests
 
 --- Phase 2: Configure & add liquidity ---
 
 2.1 Create/get PancakeSwap pair TCGV/WBNB...
-    Pair created: 0xB0F9d3d4b5B5B3688223229ba7066A40D9733039
+    Pair created: 0x5B03B356B181A35505B2cEd017Ab3C9677E114BF
     Pair set on token.
 
 2.2 Add liquidity via wrapper...
@@ -51,108 +50,3 @@ WBNB: 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c
     Reserves: 1000000 TCGV / 10 WBNB
 
 2.3 Simple transfer (A → B, fresh address): no fee, no burn...
-    Deployer → Trader: 1000 TCGV (no fee, deployer excluded).
-    Trader → Fresh 0x003F39A9728095a32dCC45166BB5fA17460f5DF2: 500 TCGV received, burn: 0 (regular transfer, no fee/no burn).
-    [OK] 2.3 Simple transfer to fresh address: no fee, no burn.
-
---- Phase 3: Buy flows ---
-
-3.1 Buy via PancakeSwap router (swapExactETHForTokensSupportingFeeOnTransferTokens)...
-    BNB in: 0.05 (compare amount)
-    Trader TCGV: +4218.336048955832783992
-    Vault TCGV:  +496.299643030385950073
-    Burned:      99.230152116319854724 TCGV (totalSupply: 1000000000 → 999999900.769847883680145276)
-    NEXUS:       1488.824487866764511996
-    [OK] 3.1 Buy tax 15%, vault + burn shares match whitepaper
-
-3.2 Buy via TCGVaultBuyRouter (BNB fee path, NEXUS cashback) — same BNB as 3.1 for comparison...
-    Trader TCGV: +4066.326091026962222237
-    Burned:      82.986246755652290249 TCGV (totalSupply: 999999900.769847883680145276 → 999999817.783601128027855027)
-    BNB fee: 13% (10% vault, 3% marketing); router keeps 0 BNB. 2% of TCGV received is burned.
-    Vault BNB (latest):     +0.005 (expected >= 0.005)
-    Marketing BNB (latest): +0.0015 (expected >= 0.0015)
-    Vault receiver total:     0.005
-    Marketing receiver total: 0.0015
-    Router BNB after: 0 (expected 0)
-    Router vault=0x312d27bD97c52615eE7609C463b5b6c3E80414d3, marketing=0x315DbCc5065D44b3b16a98fFB882Fb3Fc24a047A
-    Trader TCGV: +4066.326091026962222237
-    Vault BNB:     +0.005 (>= 10% of buy)
-    Marketing BNB: +0.0015 (>= 3% of buy)
-    NEXUS:         +1244.793701334784353745
-    [OK] 3.2 Vault + Marketing BNB and NEXUS 30% presale cashback match whitepaper
-
-5.1 Deploy dummy PancakeRouter (same factory + WETH as official)...
-    Dummy router: 0xd3f5aab8113f3bce399539c64aee4c7959907962
-
-3.3 Direct pair swap (WBNB → TCGV, no router)...
-    BNB in: 0.05 (compare amount)
-    Trader TCGV: +4141.368684450536051947
-    Burned:      97.419608053633492186 TCGV (totalSupply: 999999817.783601128027855027 → 999999720.363993074394362841)
-    [OK] 3.3 Direct swap burn (2% of buy) applied
-
---- Phase 5: Buy via dummy router (fee parity, before any sell) ---
-
-5.2 Buy TCGV via dummy router (swapExactETHForTokensSupportingFeeOnTransferTokens)...
-    BNB in: 0.05 (compare amount)
-    Trader TCGV: +4100.791427422368512914
-    Burned:      96.465087754482656959 TCGV (totalSupply: 999999720.363993074394362841 → 999999623.898905319911705882)
-    [OK] 5.2 Dummy router applies same buy tax/burn as official PancakeSwap
-
---- BUY comparison (same BNB in for all routes — most TCGV out = best for user) ---
-    BNB in: 0.05 (identical for all)
-    Route                      | BNB in    | Trader TCGV   | Burned TCGV | TCGV/BNB (1e6)
-    ---------------------------|-----------|---------------|---------------|----------------
-    PancakeSwap router (3.1)     |      0.05 | 4218.336048955832783992 | 99.230152116319854724 |    84366720979
-    TCGVaultBuyRouter (3.2)      |      0.05 | 4066.326091026962222237 | 82.986246755652290249 |    81326521820
-    Direct pair swap (3.3)       |      0.05 | 4141.368684450536051947 | 97.419608053633492186 |    82827373689
-    Dummy router (5.2)           |      0.05 | 4100.791427422368512914 | 96.465087754482656959 |    82015828548
-    >> Best for user (most TCGV per BNB): PancakeSwap router (3.1)
-    Note: Order of execution depletes pool (first buy gets most TCGV). BuyRouter also gives NEXUS bonus.
-
---- Phase 4: Sell flows ---
-
-    Using same TCGV amount for both sell routes: 8513.411125927849785545 (comparison)
-
-4.1 Sell via PancakeSwap router (swapExactTokensForETHSupportingFeeOnTransferTokens)...
-    Trader sold:  8513.411125927849785545 TCGV
-    Trader BNB:   +-0.000017067801649014
-    Vault TCGV:   +340.536445037113991421
-    Burned:       85.134111259278497855 TCGV (totalSupply: 999999623.898905319911705882 → 999999538.764794060633208027)
-    [OK] 4.1 Sell tax 10%, vault 4%, burn 1% match whitepaper
-
-4.2 Sell via TCGVaultBuyRouter (TCGV fee → BNB to user) — same TCGV amount for comparison...
-    Trader sold:   8513.411125927849785545 TCGV
-    Trader BNB:    +-0.000012074214841983
-    Vault TCGV:    +595.938778814949484987
-    Burned:        85.134111259278497855 TCGV (totalSupply: 999999538.764794060633208027 → 999999453.630682801354710172)
-    [OK] 4.2 Sell tax 10%, vault 4%+autolp 3% to vault (manual LP), burn 1% match whitepaper
-
---- SELL comparison (same TCGV sold — most BNB out = best for user) ---
-    TCGV sold: 8513.411125927849785545 (identical for both)
-    Route                      | TCGV sold    | BNB out      | BNB/TCGV (1e6)
-    ---------------------------|--------------|--------------|----------------
-    PancakeSwap router (4.1)     | 8513.411125927849785545 | -0.000017067801649014 |              0
-    TCGVaultBuyRouter (4.2)      | 8513.411125927849785545 | -0.000012074214841983 |              0
-    >> Best for user (most BNB per TCGV sold): TCGVaultBuyRouter (4.2)
-    Note: 4.2 runs after 4.1 so pool state differs; same sell amount used for fair comparison.
-
-================================================================================
-End-to-end summary
-================================================================================
-TCGVaultToken:            0x6e24Cebe742eB719Ffe272Ca69bC83fD48bf8E5d
-TCGNexusToken:           0xd44b059795c8286Bfe4C43C552039cEEaE68E7cd
-TCGVaultBuyRouter:       0x2da3b70a2e164a03fe8779c1e02a1f6caf28a951
-TCGVaultLiquidityWrapper: 0x70ba282c47bf1eb777dc552142288300f686b06a
-PancakeSwap Pair:         0xB0F9d3d4b5B5B3688223229ba7066A40D9733039
-Dummy router (Phase 5):   0xd3f5aab8113f3bce399539c64aee4c7959907962
-Vault (BNB/TCGV):        0x312d27bd97c52615ee7609c463b5b6c3e80414d3
-Marketing (BNB/TCGV):     0x315dbcc5065d44b3b16a98ffb882fb3fc24a047a
-Community (TCGV):         0x0d9ede98345af8a1fa03e43e8fecce98d98e1421
-
-Tokenomics (whitepaper §5, §6) verified:
-  Buy (Pancake direct): 15% in TCGV (10% vault, 3% marketing, 2% burn) + NEXUS cashback (30% presale / 10% standard)
-  Buy (BuyRouter):      13% BNB (10% vault, 3% marketing) + 2% TCGV burn + NEXUS cashback (30% presale / 10% standard)
-  Sell: 10% (4% vault, 3% LP, 1% marketing, 1% community, 1% burn)
-
-Flow: Deploy → Pair & Liquidity → Buy 4 routes (same BNB) → Buy comparison → Sell 2 routes (same TCGV) → Sell comparison
-All steps completed successfully. Production-ready.

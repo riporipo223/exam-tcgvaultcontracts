@@ -1,23 +1,26 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.27;
 
-/// @notice Router interface for add/remove liquidity (Uniswap V2 / PancakeSwap compatible).
+/// @notice Router interface for add/remove liquidity (Uniswap V2 / PancakeSwap compatible). TCGV/USDC pool.
 interface IRouter {
-    function addLiquidityETH(
-        address token,
-        uint256 amountTokenDesired,
-        uint256 amountTokenMin,
-        uint256 amountETHMin,
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint256 amountADesired,
+        uint256 amountBDesired,
+        uint256 amountAMin,
+        uint256 amountBMin,
         address to,
         uint256 deadline
-    ) external payable returns (uint256 amountToken, uint256 amountETH, uint256 liquidity);
+    ) external returns (uint256 amountA, uint256 amountB, uint256 liquidity);
 
-    function removeLiquidityETH(
-        address token,
+    function removeLiquidity(
+        address tokenA,
+        address tokenB,
         uint256 liquidity,
-        uint256 amountTokenMin,
-        uint256 amountETHMin,
+        uint256 amountAMin,
+        uint256 amountBMin,
         address to,
         uint256 deadline
-    ) external returns (uint256 amountToken, uint256 amountETH);
+    ) external returns (uint256 amountA, uint256 amountB);
 }

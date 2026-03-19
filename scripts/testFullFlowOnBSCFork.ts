@@ -1,39 +1,214 @@
 /**
  * Full flow on BSC fork: Presale (Founder NFT + InitialLaunch with USDC) → Finalize → Claim → optional DEX.
  *
+ * Unit tests (TCGVaultFounderNFTAndLaunch.test.ts) cover presale edge cases (PresaleEnded, caps, vesting).
+ * This script asserts the general flow end-to-end and expands with large-scale (multiple buyers, allocation consistency).
+ *
  * Requires a BSC mainnet fork (TCGVaultToken constructor calls PancakeSwap router).
  *
- * Option A — separate node:
- *   npx hardhat node --fork https://bsc-dataseed.binance.org/
- *   npx hardhat run scripts/testFullFlowOnBSCFork.ts --network localhost
+ * Recommended — Hardhat fork (no Anvil/Docker needed; pass RPC via env):
+ *   BSC_RPC_URL="https://your-bsc-rpc-url" yarn hardhat run scripts/testFullFlowOnBSCFork.ts --network hardhat
  *
- * Option B — hardhat network with fork (set BSC_RPC_URL in env or hardhat.config):
- *   BSC_RPC_URL=https://bsc-dataseed.binance.org/ npx hardhat run scripts/testFullFlowOnBSCFork.ts --network hardhat
+ * Optional — Anvil fork (e.g. Docker):
+ *   docker run --rm -it -p 8545:8545 --entrypoint anvil ghcr.io/foundry-rs/foundry:latest \
+ *     --fork-url "https://<your-bsc-rpc>" --host 0.0.0.0 --port=8545
+ *   yarn hardhat run scripts/testFullFlowOnBSCFork.ts --network localhost
+ *
+ * On Phase 4 revert the script prints revert reason and simulation decode (no env needed).
  *
  * Flow:
- *   1. Deploy: MockUSDC, TCGVaultToken, TCGNexusToken, TCGVaultFounderNFT, TCGVaultInitialLaunch, BuyRouter, Wrapper.
- *   2. Wire: set Nexus on token, set presale finalizer = InitialLaunch, set Nexus presale minters.
- *   3. Fund deployer/trader with MockUSDC; trader buys TCGV via InitialLaunch (wave 1).
- *   4. Mint 245 Founder NFTs (wave 2 starts).
- *   5. Time travel 121h, set allocation recipients, finalize presale.
- *   6. Trader claims vested TCGV.
- *   7. Optional: add liquidity, set pair, one DEX buy/sell.
+ *   1. Deploy: TCGVaultToken, TCGNexusToken, TCGVaultFounderNFT, TCGVaultInitialLaunch, BuyRouter, Wrapper, TCGR, Converter (USDC = real BSC USDC).
+ *   2. Fund all accounts with real USDC via storage cheatcode; wire presale finalizer and Nexus minters.
+ *   3. Trader buys TCGV (wave 1).
+ *   4. Mint 250 Founder NFTs (245 trader + 5 owner) so wave 2 starts; exhaust to 500; wave-2 buys; large-scale multiple buyers.
+ *   5. Time travel 121h, finalize; assert buy() reverts (PresaleEnded).
+ *   6. Trader claims 10% TGE; vesting over 9 months.
+ *   7. Optional: DEX liquidity, swap, BuyRouter referral, TCGR→TCGV convert.
  */
 
+import { NetworkHelpers } from "@nomicfoundation/hardhat-network-helpers/types";
 import hre from "hardhat";
 import {
   parseEther,
   formatEther,
   zeroAddress,
   getContractAddress,
+  encodeFunctionData,
+  decodeErrorResult,
+  keccak256,
+  encodeAbiParameters,
+  toHex,
   type Address,
 } from "viem";
 
 const PANCAKE_ROUTER = "0x10ED43C718714eb63d5aA57B78B54704E256024E" as Address;
 const PANCAKE_FACTORY = "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73" as Address;
-const FOUNDER_NFT_WAVE1_CAP = 245;
+/** BSC USDC (BEP20). 6 decimals. Balance at slot 1 (Anvil/Hardhat setStorageAt). */
+const BSC_USDC = "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d" as Address;
+const USDC_DECIMALS = 6;
+
+/** BSC USDC _balances mapping at slot 1 (keyThenSlot = keccak256(h(account).1)). Verified on fork. */
+const BSC_USDC_BALANCES_SLOT = 1;
+
+/**
+ * Storage slot for mapping(address => uint256) at slot p: keccak256(h(k) . p) per Solidity layout.
+ */
+function mappingSlotForKey(account: Address, mappingSlot: number): `0x${string}` {
+  return keccak256(
+    encodeAbiParameters(
+      [{ type: "address" }, { type: "uint256" }],
+      [account, BigInt(mappingSlot)],
+    ),
+  ) as `0x${string}`;
+}
+
+/** Ensure 32-byte hex string for storage (0x + 64 hex chars). */
+function toStorageHex(v: `0x${string}` | Uint8Array): string {
+  if (typeof v === "string") return v.startsWith("0x") ? v : `0x${v}`;
+  return "0x" + Array.from(v).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Set storage at (address, slot, value). Use networkHelpers.setStorageAt (Hardhat) or anvil_setStorageAt (Anvil/localhost). */
+type SetStorageAtFn = (address: string, slotHex: string, valueHex: string) => Promise<void>;
+
+/** Set BSC USDC balance via storage slot (cheatcode). Amount in token decimals (e.g. 6 for USDC). */
+async function setBSCUSDCBalance(
+  account: Address,
+  usdcContract: Address,
+  amount: bigint,
+  setStorageAt: SetStorageAtFn,
+  usdcForVerify?: { read: { balanceOf: (args: [Address]) => Promise<bigint> } },
+  balancesSlot = BSC_USDC_BALANCES_SLOT,
+): Promise<void> {
+  const addressStr = (typeof usdcContract === "string" ? usdcContract : String(usdcContract)).toLowerCase();
+  const storageSlot = mappingSlotForKey(account, balancesSlot);
+  const value = toHex(amount, { size: 32 });
+  await setStorageAt(addressStr, toStorageHex(storageSlot as `0x${string}`), toStorageHex(value as `0x${string}`));
+  if (usdcForVerify) {
+    const balance = await usdcForVerify.read.balanceOf([account]);
+    if (balance !== amount) throw new Error(`setBSCUSDCBalance verify failed for ${account} (slot ${balancesSlot}): expected ${amount}, got ${balance}`);
+  }
+}
+
+const FOUNDER_NFT_WAVE1_CAP = 250;
+const WAVE1_NON_OWNER_MINTS = 245;
+const WAVE1_OWNER_MINTS = 5;
 const PRESALE_COUNTDOWN_HOURS = 120;
 const USDC_6 = 1_000_000n; // 1 USDC = 1e6
+
+/**
+ * Print revert reason from a caught error (viem contract errors have cause/shortMessage/data).
+ * Then run debug_traceCall so we see the call tree. Always runs on Phase 4 revert (no TRACE env needed).
+ */
+function formatRevertReason(e: unknown): string {
+  if (e instanceof Error && "cause" in e && e.cause && typeof e.cause === "object") {
+    const c = e.cause as { shortMessage?: string; data?: unknown; message?: string };
+    let out = c.shortMessage ?? c.message ?? "reverted";
+    const data = c.data;
+    if (data && typeof data === "string" && data.startsWith("0x")) {
+      try {
+        const decoded = decodeErrorResult({
+          data: data as `0x${string}`,
+          abi: [
+            { type: "error", name: "ExceedsSupply", inputs: [] },
+            { type: "error", name: "OwnerWaveQuotaExceeded", inputs: [] },
+            { type: "error", name: "ReservedForOwner", inputs: [] },
+            { type: "error", name: "Error", inputs: [{ name: "message", type: "string" }] },
+          ],
+        });
+        out += ` [decoded: ${decoded.errorName}${decoded.args?.length ? " " + JSON.stringify(decoded.args) : ""}]`;
+      } catch {
+        out += " | data: " + data.slice(0, 66) + (data.length > 66 ? "..." : "");
+      }
+    } else if (data) out += " | " + String(data);
+    return out;
+  }
+  return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Trace a contract call using debug_traceCall (Anvil supports it; use --hardfork cancun if needed).
+ * Logs to console so it's visible when script is run.
+ */
+async function traceCall(
+  publicClient: { request: (args: { method: string; params: unknown[] }) => Promise<unknown> },
+  opts: { to: Address; data: `0x${string}`; from: Address; value?: bigint },
+): Promise<void> {
+  const call = {
+    from: opts.from,
+    to: opts.to,
+    data: opts.data,
+    value: opts.value ?? 0n,
+    gas: 30_000_000n,
+  };
+  try {
+    // Anvil: debug_traceCall(call, block, { tracer: "callTracer" })
+    const trace = (await publicClient.request({
+      method: "debug_traceCall",
+      params: [call, "latest", { tracer: "callTracer" }],
+    })) as Record<string, unknown>;
+    const prune = (obj: unknown, depth = 0): unknown => {
+      if (depth > 6) return "[...]";
+      if (Array.isArray(obj)) return obj.map((x) => prune(x, depth + 1));
+      if (obj && typeof obj === "object") {
+        const out: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(obj)) {
+          if (k === "input" && typeof v === "string" && v.length > 70) out[k] = v.slice(0, 70) + "...";
+          else out[k] = prune(v, depth + 1);
+        }
+        return out;
+      }
+      return obj;
+    };
+    console.log("\n--- Trace (debug_traceCall) ---");
+    console.log(JSON.stringify(prune(trace), null, 2));
+    if (trace.error) console.log("Revert in trace:", trace.error);
+    console.log("--- End trace ---\n");
+  } catch (tracerErr) {
+    console.log("Tracer failed (node may not support debug_traceCall or use different params):", tracerErr instanceof Error ? tracerErr.message : tracerErr);
+  }
+}
+
+/** Simulate mint via eth_call to get revert data; decode and log. */
+async function simulateMintAndLogRevert(
+  publicClient: { call: (args: { to: Address; data: `0x${string}`; account: Address }) => Promise<unknown> },
+  founderNFTAddress: Address,
+  founderNFTAbi: readonly unknown[],
+  from: Address,
+): Promise<void> {
+  const data = encodeFunctionData({
+    abi: founderNFTAbi as Parameters<typeof encodeFunctionData>[0]["abi"],
+    functionName: "mint",
+    args: [],
+  });
+  try {
+    await publicClient.call({ to: founderNFTAddress, data, account: from });
+  } catch (simErr: unknown) {
+    const err = simErr as { data?: unknown; cause?: { data?: unknown } };
+    const revertData = err.data ?? (err.cause && typeof err.cause === "object" && "data" in err.cause ? (err.cause as { data: unknown }).data : undefined);
+    if (revertData && typeof revertData === "string" && revertData.startsWith("0x") && revertData.length > 10) {
+      console.log("Simulation revert data (hex):", revertData.slice(0, 138) + (revertData.length > 138 ? "..." : ""));
+      try {
+        const decoded = decodeErrorResult({
+          data: revertData as `0x${string}`,
+          abi: [
+            { type: "error", name: "ExceedsSupply", inputs: [] },
+            { type: "error", name: "OwnerWaveQuotaExceeded", inputs: [] },
+            { type: "error", name: "ReservedForOwner", inputs: [] },
+            { type: "error", name: "Error", inputs: [{ name: "message", type: "string" }] },
+            { type: "error", name: "ERC20InsufficientBalance", inputs: [{ name: "from", type: "address" }, { name: "balance", type: "uint256" }, { name: "needed", type: "uint256" }] },
+            { type: "error", name: "ERC20InsufficientAllowance", inputs: [{ name: "spender", type: "address" }, { name: "allowance", type: "uint256" }, { name: "needed", type: "uint256" }] },
+          ],
+        });
+        console.log("Decoded revert:", decoded.errorName, decoded.args ? JSON.stringify(decoded.args) : "");
+      } catch {
+        // ignore
+      }
+    } else {
+      console.log("Simulation error (no revert data):", simErr instanceof Error ? simErr.message : String(simErr));
+    }
+  }
+}
 
 async function main() {
   const { viem, networkHelpers } = await hre.network.connect();
@@ -43,6 +218,23 @@ async function main() {
   }
   const deployer = wallets[0]!;
   const trader = wallets[1]!;
+  const wave2Buyer = wallets[2] ?? wallets[1]!;
+  const whale = wallets[3] ?? wallets[1]!;
+
+  // Fund trader EOA (custom private key) with BNB from the rich Anvil account
+  // so it can pay gas for NFT mints and presale buys.
+  await deployer.sendTransaction({
+    to: trader.account.address,
+    value: parseEther("10"),
+  });
+  await deployer.sendTransaction({
+    to: wave2Buyer.account.address,
+    value: parseEther("5"),
+  });
+  await deployer.sendTransaction({
+    to: whale.account.address,
+    value: parseEther("5"),
+  });
 
   const vaultReceiver = await viem.deployContract("FeeReceiver", [], { client: { wallet: deployer } });
   const marketingReceiver = await viem.deployContract("FeeReceiver", [], { client: { wallet: deployer } });
@@ -52,7 +244,12 @@ async function main() {
   const communityAddr = communityReceiver.address as Address;
 
   const publicClient = await viem.getPublicClient();
-  const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+
+  // Storage cheat: Hardhat network uses networkHelpers.setStorageAt; Anvil (localhost) uses anvil_setStorageAt.
+  const setStorageAt: SetStorageAtFn = async (address: string, slotHex: string, valueHex: string) => {
+    if (networkHelpers?.setStorageAt) await networkHelpers.setStorageAt(address, slotHex, valueHex);
+    else await (publicClient as { request: (args: { method: string; params: unknown[] }) => Promise<unknown> }).request({ method: "anvil_setStorageAt", params: [address, slotHex, valueHex] });
+  };
 
   console.log("=".repeat(80));
   console.log("TCG Vault — Full flow on BSC fork (Presale → Finalize → Claim)");
@@ -63,12 +260,8 @@ async function main() {
 
   let nonce = await publicClient.getTransactionCount({ address: deployer.account.address });
 
-  // --- Phase 1: Deploy MockUSDC and core contracts ---
-  console.log("--- Phase 1: Deploy MockUSDC and core contracts ---");
-  const mockUsdc = await viem.deployContract("contracts/test/MockUSDC.sol:MockUSDC", [], { client: { wallet: deployer } });
-  const usdcAddress = mockUsdc.address as Address;
-  nonce++;
-  console.log("MockUSDC:", usdcAddress);
+  // --- Phase 1: Deploy core contracts (use real BSC USDC) ---
+  console.log("--- Phase 1: Deploy core contracts (USDC = real BSC USDC) ---");
 
   await viem.deployContract("TCGVaultToken", [
     PANCAKE_ROUTER,
@@ -89,7 +282,7 @@ async function main() {
   await token.write.setAddresses([vaultAddr, marketingAddr, communityAddr, nexusTokenAddress], { account: deployer.account });
 
   const founderNFT = await viem.deployContract("TCGVaultFounderNFT", [
-    usdcAddress,
+    BSC_USDC,
     nexusTokenAddress,
     vaultAddr,
   ], { client: { wallet: deployer } });
@@ -98,7 +291,7 @@ async function main() {
 
   const initialLaunch = await viem.deployContract("TCGVaultInitialLaunch", [
     tokenAddress,
-    usdcAddress,
+    BSC_USDC,
     founderNFTAddress,
     nexusTokenAddress,
     vaultAddr,
@@ -116,43 +309,226 @@ async function main() {
   console.log("--- Phase 2: BuyRouter & Wrapper ---");
   const buyRouter = await viem.deployContract("TCGVaultBuyRouter", [
     PANCAKE_ROUTER,
+    BSC_USDC,
     tokenAddress,
     vaultAddr,
     marketingAddr,
     communityAddr,
   ], { client: { wallet: deployer } });
   await token.write.setBuyRouter([buyRouter.address as Address], { account: deployer.account });
-  const wrapper = await viem.deployContract("contracts/TCGVaultLiquidityWrapper.sol:TCGVaultLiquidityWrapper", [PANCAKE_ROUTER], { client: { wallet: deployer } });
+  const wrapper = await viem.deployContract(
+    "contracts/TCGVaultLiquidityWrapper.sol:TCGVaultLiquidityWrapper",
+    [tokenAddress, PANCAKE_ROUTER],
+    { client: { wallet: deployer } },
+  );
   await token.write.setLiquidityWrapper([wrapper.address as Address], { account: deployer.account });
   await token.write.setExcludedFromFees([wrapper.address as Address, true], { account: deployer.account });
+
+  const tcgr = await viem.deployContract("TCGRToken", [buyRouter.address as Address], { client: { wallet: deployer } });
+  const tcgrAddress = tcgr.address as Address;
+  await buyRouter.write.setReferralToken([tcgrAddress], { account: deployer.account });
+  const converter = await viem.deployContract("TCGRToTCGVConverter", [
+    tcgrAddress,
+    tokenAddress,
+    parseEther("1"),
+  ], { client: { wallet: deployer } });
+  const converterAddress = converter.address as Address;
+  await tcgr.write.setConverter([converterAddress], { account: deployer.account });
+  console.log("TCGRToken (referral):", tcgrAddress);
+  console.log("TCGRToTCGVConverter (1:1):", converterAddress);
   console.log("BuyRouter and Wrapper set.");
   console.log();
 
-  // --- Phase 3: Fund USDC and trader buy (wave 1) ---
-  console.log("--- Phase 3: Fund USDC, trader buy in wave 1 ---");
-  const deployerUsdc = 50_000n * USDC_6;   // 245 * 200 + buffer
-  const traderUsdc = 2_000n * USDC_6;
-  await (mockUsdc as any).write.mint([deployer.account.address, deployerUsdc], { account: deployer.account });
-  await (mockUsdc as any).write.mint([trader.account.address, traderUsdc], { account: deployer.account });
+  // --- Fund all accounts with real USDC via storage cheatcode ---
+  const usdc = await viem.getContractAt('BEP20TokenImplementation', BSC_USDC);
+  const BIG_USDC = 50_000_000n * USDC_6;
+  await setBSCUSDCBalance(deployer.account.address, BSC_USDC, BIG_USDC, setStorageAt, usdc);
+  await setBSCUSDCBalance(trader.account.address, BSC_USDC, BIG_USDC, setStorageAt, usdc);
+  await setBSCUSDCBalance(wave2Buyer.account.address, BSC_USDC, 100_000n * USDC_6, setStorageAt, usdc);
+  await setBSCUSDCBalance(whale.account.address, BSC_USDC, BIG_USDC, setStorageAt, usdc);
+  console.log("Funded deployer, trader, wave2Buyer, whale with real USDC (cheatcode); balanceOf verified.");
 
+  // --- Phase 3: Trader buy (wave 1) ---
+  console.log("--- Phase 3: Trader buy in wave 1 ---");
   const buyUsdcAmount = 1_000n * USDC_6;
-  await (mockUsdc as any).write.approve([initialLaunchAddress, buyUsdcAmount], { account: trader.account });
+  await usdc.write.approve([initialLaunchAddress, buyUsdcAmount], { account: trader.account });
   await initialLaunch.write.buy([buyUsdcAmount], { account: trader.account });
   const allocated = (await initialLaunch.read.allocations([trader.account.address])) as readonly [bigint, bigint];
   console.log(`Trader bought with ${Number(buyUsdcAmount) / 1e6} USDC; TCGV allocated: ${formatEther(allocated[0])}`);
   console.log();
 
-  // --- Phase 4: Mint 245 Founder NFTs (wave 2 starts) ---
-  console.log("--- Phase 4: Mint 245 Founder NFTs (wave 2) ---");
+  // --- Phase 4: Mint 250 Founder NFTs so wave 2 starts (5 owner first, then 245 trader) ---
+  // Owner mints the 5 reserved wave-1 slots first so trader never hits ReservedForOwner.
+  console.log("--- Phase 4: Mint 250 Founder NFTs (wave 2 starts) ---");
   const wave1Price = 200n * USDC_6;
-  await (mockUsdc as any).write.approve([founderNFTAddress, wave1Price * BigInt(FOUNDER_NFT_WAVE1_CAP)], { account: deployer.account });
-  for (let i = 0; i < FOUNDER_NFT_WAVE1_CAP; i++) {
-    await founderNFT.write.mint({ account: deployer.account });
-    if ((i + 1) % 50 === 0) console.log(`  Minted ${i + 1}/${FOUNDER_NFT_WAVE1_CAP}`);
+  let deployerUsdcBalance = await usdc.read.balanceOf([deployer.account.address]);
+  let deployerAllowance = await usdc.read.allowance([deployer.account.address, founderNFTAddress]);
+  if (deployerUsdcBalance === 0n) {
+    console.log("Deployer USDC balance was 0; retrying with balances at slot 0 (some BEP20 use slot 0).");
+    await setBSCUSDCBalance(deployer.account.address, BSC_USDC, BIG_USDC, setStorageAt, undefined, 0);
+    deployerUsdcBalance = await usdc.read.balanceOf([deployer.account.address]);
+    deployerAllowance = await usdc.read.allowance([deployer.account.address, founderNFTAddress]);
+  }
+  console.log("Deployer USDC balance:", deployerUsdcBalance.toString(), "| allowance for Founder NFT:", deployerAllowance.toString(), "| need:", wave1Price.toString());
+  try {
+    await usdc.write.approve([founderNFTAddress, wave1Price * BigInt(WAVE1_OWNER_MINTS)], { account: deployer.account });
+    for (let i = 0; i < WAVE1_OWNER_MINTS; i++) {
+      await founderNFT.write.mint({ account: deployer.account });
+    }
+    console.log(`  Owner minted ${WAVE1_OWNER_MINTS} (reserved wave-1 slots).`);
+    await usdc.write.approve([founderNFTAddress, wave1Price * BigInt(WAVE1_NON_OWNER_MINTS)], { account: trader.account });
+    for (let i = 0; i < WAVE1_NON_OWNER_MINTS; i++) {
+      await founderNFT.write.mint({ account: trader.account });
+      if ((i + 1) % 50 === 0) console.log(`  Minted ${i + 1}/${WAVE1_NON_OWNER_MINTS} (trader)`);
+    }
+  } catch (e: unknown) {
+    console.log("\n--- Phase 4 mint reverted ---");
+    console.log("Revert reason:", formatRevertReason(e));
+    await simulateMintAndLogRevert(
+      publicClient as { call: (args: { to: Address; data: `0x${string}`; account: Address }) => Promise<unknown> },
+      founderNFTAddress,
+      founderNFT.abi,
+      deployer.account.address,
+    );
+    const data = encodeFunctionData({
+      abi: founderNFT.abi,
+      functionName: "mint",
+      args: [],
+    });
+    await traceCall(publicClient as { request: (args: { method: string; params: unknown[] }) => Promise<unknown> }, {
+      to: founderNFTAddress,
+      data,
+      from: deployer.account.address,
+    });
+    throw e;
   }
   const soldCount = await founderNFT.read.soldCount();
   const w2 = await founderNFT.read.wave2StartTimestamp();
+  if (soldCount !== BigInt(FOUNDER_NFT_WAVE1_CAP)) throw new Error(`Expected soldCount ${FOUNDER_NFT_WAVE1_CAP}, got ${soldCount}`);
+  if (w2 === 0n) throw new Error("wave2StartTimestamp should be set after 250 mints");
   console.log(`Founder NFT soldCount: ${soldCount}, wave2StartTimestamp: ${w2}`);
+  console.log();
+
+  // --- Phase 4.A: Founder NFT wave 2 price and supply edge ---
+  console.log("--- Phase 4.A: Founder NFT wave 2 price & cap edge ---");
+  const nftPriceBefore = await founderNFT.read.currentPrice();
+  console.log("FounderNFT currentPrice before extra mint (expected 350):", Number(nftPriceBefore) / 1e6);
+  const wave2NftPrice = 350n * USDC_6;
+  await usdc.write.approve([founderNFTAddress, wave2NftPrice], { account: trader.account });
+  await founderNFT.write.mint({ account: trader.account });
+  const soldCountAfterOne = await founderNFT.read.soldCount();
+  const nftPriceAfter = await founderNFT.read.currentPrice();
+  console.log("Founder NFT soldCount after extra mint (expected 251):", soldCountAfterOne);
+  console.log("FounderNFT currentPrice after extra mint (should stay 350):", Number(nftPriceAfter) / 1e6);
+  console.log();
+
+  // --- Phase 4.B: Exhaust Founder NFT paid supply to TOTAL_SALE (500) ---
+  console.log("--- Phase 4.B: Exhaust Founder NFT supply to 500 ---");
+  const totalSale = await founderNFT.read.TOTAL_SALE();
+  let paidSold = await founderNFT.read.soldCount();
+  console.log("TOTAL_SALE:", totalSale.toString(), "| already sold:", paidSold.toString());
+  if (paidSold < totalSale) {
+    const remaining = totalSale - paidSold;
+    const wave2PriceUsdc = 350n * USDC_6;
+    const traderWave2Mints = remaining - BigInt(WAVE1_OWNER_MINTS);
+    const ownerWave2Mints = BigInt(WAVE1_OWNER_MINTS);
+    await usdc.write.approve([founderNFTAddress, wave2PriceUsdc * traderWave2Mints], { account: trader.account });
+    for (let i = paidSold; i < paidSold + traderWave2Mints; i++) {
+      await founderNFT.write.mint({ account: trader.account });
+    }
+    await usdc.write.approve([founderNFTAddress, wave2PriceUsdc * ownerWave2Mints], { account: deployer.account });
+    for (let i = 0n; i < ownerWave2Mints; i++) {
+      await founderNFT.write.mint({ account: deployer.account });
+    }
+  }
+  const soldCountAfterAllPaid = await founderNFT.read.soldCount();
+  if (soldCountAfterAllPaid !== totalSale) throw new Error(`Expected soldCount ${totalSale}, got ${soldCountAfterAllPaid}`);
+  console.log("Founder NFT soldCount after exhausting TOTAL_SALE:", soldCountAfterAllPaid.toString());
+  // Expected-revert test: one more mint must revert with ExceedsSupply (no try/catch on happy path).
+  try {
+    await founderNFT.write.mint({ account: trader.account });
+    throw new Error("Extra paid mint should revert with ExceedsSupply");
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!msg.includes("revert") && !msg.includes("ExceedsSupply")) console.log("Extra paid mint reverted as expected (ExceedsSupply):", msg);
+  }
+  console.log();
+
+  // --- Phase 4.5: Wave 2 presale buy at higher price (0.008 $/TCGV) ---
+  console.log("--- Phase 4.5: Wave 2 presale buy (higher price) ---");
+  const wave2PriceRaw = await initialLaunch.read.currentPrice();
+  console.log("InitialLaunch currentPrice (USDC, 6 decimals):", Number(wave2PriceRaw) / 1e6);
+  const wave2BuyUsdcAmount = 1_000n * USDC_6;
+  const wave2BeforeAlloc = (await initialLaunch.read.allocations([wave2Buyer.account.address])) as readonly [bigint, bigint];
+  await usdc.write.approve([initialLaunchAddress, wave2BuyUsdcAmount], { account: wave2Buyer.account });
+  await initialLaunch.write.buy([wave2BuyUsdcAmount], { account: wave2Buyer.account });
+  const wave2Allocated = (await initialLaunch.read.allocations([wave2Buyer.account.address])) as readonly [bigint, bigint];
+  const wave2Delta = wave2Allocated[0] - wave2BeforeAlloc[0];
+  console.log(
+    `Wave 2 buyer spent ${Number(wave2BuyUsdcAmount) / 1e6} USDC; additional TCGV allocated at wave 2 price: ${formatEther(
+      wave2Delta,
+    )} (total for this address: ${formatEther(wave2Allocated[0])})`,
+  );
+  console.log();
+
+  // --- Phase 4.5b: Large-scale — multiple wave-2 buyers (use wallets 3+ so we don't duplicate wave2Buyer) ---
+  console.log("--- Phase 4.5b: Large-scale (multiple wave-2 buyers) ---");
+  const extraBuyers = wallets.slice(3, Math.min(7, wallets.length));
+  const perBuyerUsdc = [500n * USDC_6, 300n * USDC_6, 800n * USDC_6, 200n * USDC_6];
+  const buyerAddresses: Address[] = [trader.account.address, wave2Buyer.account.address];
+  for (let i = 0; i < extraBuyers.length; i++) {
+    const acc = extraBuyers[i]!;
+    const usdcAmt = perBuyerUsdc[i % perBuyerUsdc.length]!;
+    await setBSCUSDCBalance(acc.account.address, BSC_USDC, 10_000n * USDC_6, setStorageAt, usdc);
+    await usdc.write.approve([initialLaunchAddress, usdcAmt], { account: acc.account });
+    await initialLaunch.write.buy([usdcAmt], { account: acc.account });
+    buyerAddresses.push(acc.account.address);
+  }
+  let totalFromAllocations = 0n;
+  for (const addr of buyerAddresses) {
+    const [alloc] = (await initialLaunch.read.allocations([addr])) as readonly [bigint, bigint];
+    totalFromAllocations += alloc;
+  }
+  const totalAllocatedCheck = await initialLaunch.read.totalTCGVAllocated();
+  if (totalFromAllocations !== totalAllocatedCheck) throw new Error(`totalTCGVAllocated ${totalAllocatedCheck} != sum of allocations ${totalFromAllocations}`);
+  console.log("Total TCGV allocated (presale):", formatEther(totalAllocatedCheck), "| sum of allocations:", formatEther(totalFromAllocations), "[OK]");
+  console.log();
+
+  // --- Phase 4.6: Presale HARD_CAP_TCGV edge (ExceedsHardCap) ---
+  // Expected-revert test: buy above hard cap must revert.
+  console.log("--- Phase 4.6: Presale HARD_CAP_TCGV edge ---");
+  try {
+    const hardCap = await initialLaunch.read.HARD_CAP_TCGV();
+    const priceNow = await initialLaunch.read.currentPrice();
+    const usdcForCap = (hardCap * priceNow) / (10n ** 18n);
+    const usdcAboveCap = usdcForCap + USDC_6;
+    console.log("HARD_CAP_TCGV:", formatEther(hardCap));
+    console.log("Attempting buy that exceeds HARD_CAP_TCGV with USDC:", Number(usdcAboveCap) / 1e6);
+    await usdc.write.approve([initialLaunchAddress, usdcAboveCap], { account: whale.account });
+    await initialLaunch.write.buy([usdcAboveCap], { account: whale.account });
+    console.warn("Hard cap buy did NOT revert as expected (check HARD_CAP_TCGV).");
+  } catch (e) {
+    console.log("Hard cap buy reverted as expected (ExceedsHardCap):", e instanceof Error ? e.message : e);
+  }
+  console.log();
+
+  // --- Phase 4.7: Anti-whale cap (4% per wallet) ---
+  // Expected-revert test: whale buy above per-wallet cap must revert.
+  console.log("--- Phase 4.7: Anti-whale cap (4% per wallet) ---");
+  try {
+    const maxPerWallet = await initialLaunch.read.maxPerWallet();
+    const wave2Price = await initialLaunch.read.currentPrice();
+    const usdcForMax = (maxPerWallet * wave2Price) / (10n ** 18n);
+    const usdcAboveMax = usdcForMax + USDC_6;
+    console.log("maxPerWallet (TCGV):", formatEther(maxPerWallet));
+    console.log("Attempting whale buy with USDC (just above cap):", Number(usdcAboveMax) / 1e6);
+
+    await usdc.write.approve([initialLaunchAddress, usdcAboveMax], { account: whale.account });
+    await initialLaunch.write.buy([usdcAboveMax], { account: whale.account });
+    console.warn("Whale buy did NOT revert as expected (check cap config).");
+  } catch (e) {
+    console.log("Whale buy reverted as expected (wallet cap working):", e instanceof Error ? e.message : e);
+  }
   console.log();
 
   // --- Phase 5: Time travel 121h and finalize ---
@@ -163,14 +539,10 @@ async function main() {
       await networkHelpers.mine();
       console.log("Time increased by 121h and block mined.");
     } else {
-      const provider = (hre as any).network?.provider;
-      if (provider?.request) {
-        await provider.request({ method: "evm_increaseTime", params: [PRESALE_COUNTDOWN_HOURS * 3600 + 3600] });
-        await provider.request({ method: "evm_mine", params: [] });
-        console.log("Time increased by 121h (provider) and block mined.");
-      } else {
-        throw new Error("No time travel available");
-      }
+      const rpc = publicClient as { request: (args: { method: string; params: unknown[] }) => Promise<unknown> };
+      await rpc.request({ method: "evm_increaseTime", params: [PRESALE_COUNTDOWN_HOURS * 3600 + 3600] });
+      await rpc.request({ method: "evm_mine", params: [] });
+      console.log("Time increased by 121h (Anvil/evm) and block mined.");
     }
   } catch (e) {
     console.warn("Time travel not supported (e.g. live RPC); skipping. Finalize may revert.", e instanceof Error ? e.message : e);
@@ -179,66 +551,158 @@ async function main() {
   await token.write.setAllocationRecipients([deployer.account.address, deployer.account.address, deployer.account.address], { account: deployer.account });
   await initialLaunch.write.finalize({ account: deployer.account });
   const tgeTs = await initialLaunch.read.tgeTimestamp();
+  if (tgeTs === 0n) throw new Error("finalize: tgeTimestamp must be set");
   console.log("Presale finalized. TGE timestamp:", tgeTs.toString());
   const totalAllocated = await initialLaunch.read.totalTCGVAllocated();
   console.log("Total TCGV allocated (presale):", formatEther(totalAllocated));
+
+  // Expected-revert test: buy() after finalize must revert with PresaleEnded.
+  try {
+    await usdc.write.approve([initialLaunchAddress, USDC_6], { account: trader.account });
+    await initialLaunch.write.buy([USDC_6], { account: trader.account });
+    throw new Error("buy() after finalize should revert with PresaleEnded");
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!msg.includes("PresaleEnded") && !msg.includes("revert")) console.log("buy after finalize reverted as expected (PresaleEnded):", msg);
+  }
+
+  const totalSupplyAfter = await token.read.totalSupply();
+  const expectedFinalSupply = (totalAllocated * 10000n) / 6000n;
+  console.log("TCGV totalSupply after recompute:", formatEther(totalSupplyAfter));
+  console.log("TCGV expected finalSupply from whitepaper ratio (60% presale):", formatEther(expectedFinalSupply));
   console.log();
 
   // --- Phase 6: Trader claims vested TCGV ---
   console.log("--- Phase 6: Trader claims (10% TGE) ---");
+  const traderAllocForReleasable = (await initialLaunch.read.allocations([trader.account.address])) as readonly [bigint, bigint];
   const releasable = await initialLaunch.read.releasable([trader.account.address]);
-  console.log("Releasable for trader:", formatEther(releasable));
+  const expectedTge = (traderAllocForReleasable[0] * 10n) / 100n;
+  if (releasable !== expectedTge) throw new Error(`releasable at TGE: expected 10% = ${formatEther(expectedTge)}, got ${formatEther(releasable)}`);
+  console.log("Releasable for trader (10% TGE):", formatEther(releasable));
   await initialLaunch.write.claim({ account: trader.account });
   const traderTcgv = await token.read.balanceOf([trader.account.address]);
+  if (traderTcgv !== releasable) throw new Error(`Trader TCGV after claim: expected ${formatEther(releasable)}, got ${formatEther(traderTcgv)}`);
   console.log("Trader TCGV balance after claim:", formatEther(traderTcgv));
   console.log();
 
-  // --- Phase 7 (optional): Add liquidity and one DEX swap (requires BSC fork) ---
-  console.log("--- Phase 7: Add liquidity and one DEX swap ---");
+  // --- Phase 6.N: NEXUS 30% presale bonuses ---
+  console.log("--- Phase 6.N: NEXUS 30% presale bonuses ---");
+  const nexusTrader = await nexusToken.read.balanceOf([trader.account.address]);
+  const nexusWave2Buyer = await nexusToken.read.balanceOf([wave2Buyer.account.address]);
+  console.log("NEXUS balance for trader (should reflect presale buys + Founder NFTs):", formatEther(nexusTrader));
+  console.log("NEXUS balance for wave2Buyer (should reflect presale wave2 buy):", formatEther(nexusWave2Buyer));
+  console.log();
+
+  // --- Phase 6.5: Vesting schedule over 9 months (10% per month) ---
+  console.log("--- Phase 6.5: Vesting over 9 months ---");
+  const traderAlloc = (await initialLaunch.read.allocations([trader.account.address])) as readonly [bigint, bigint];
+  console.log("Trader total allocation:", formatEther(traderAlloc[0]));
+  for (let month = 1; month <= 9; month++) {
+    try {
+      if (networkHelpers?.time) {
+        await networkHelpers.time.increase(30 * 24 * 3600);
+        await networkHelpers.mine();
+      } else {
+        const rpc = publicClient as { request: (args: { method: string; params: unknown[] }) => Promise<unknown> };
+        await rpc.request({ method: "evm_increaseTime", params: [30 * 24 * 3600] });
+        await rpc.request({ method: "evm_mine", params: [] });
+      }
+    } catch (e) {
+      console.warn(`Time travel for vesting month ${month} failed:`, e instanceof Error ? e.message : e);
+    }
+
+    const monthReleasable = await initialLaunch.read.releasable([trader.account.address]);
+    console.log(`Month ${month}: releasable for trader:`, formatEther(monthReleasable));
+    if (monthReleasable > 0n) {
+      await initialLaunch.write.claim({ account: trader.account });
+      const bal = await token.read.balanceOf([trader.account.address]);
+      console.log(`Month ${month}: trader TCGV balance after claim:`, formatEther(bal));
+    }
+  }
+  const finalAlloc = (await initialLaunch.read.allocations([trader.account.address])) as readonly [bigint, bigint];
+  console.log("Trader final claimed/allocated:", {
+    allocated: formatEther(finalAlloc[0]),
+    claimed: formatEther(finalAlloc[1]),
+  });
+  console.log();
+
+  // --- Phase 7 (optional): TCGV/USDC pair, add liquidity, swap, BuyRouter USDC buy ---
+  console.log("--- Phase 7: TCGV/USDC pair, add liquidity and DEX ---");
   try {
+    const deployerAddr = String(deployer.account.address);
+    const traderAddr = String(trader.account.address);
+    await setBSCUSDCBalance(deployerAddr as Address, BSC_USDC, 10_000_000n * 10n ** BigInt(USDC_DECIMALS), setStorageAt, usdc);
+    await setBSCUSDCBalance(traderAddr as Address, BSC_USDC, 1_000_000n * 10n ** BigInt(USDC_DECIMALS), setStorageAt, usdc);
+    const deployerUsdcBal = (await usdc.read.balanceOf([deployer.account.address])) as bigint;
+    console.log("BSC USDC deployer balance (cheatcode):", formatEther(deployerUsdcBal));
+
     const pancakeFactory = await viem.getContractAt("PancakeFactory", PANCAKE_FACTORY);
     const pancakeRouter = await viem.getContractAt("PancakeRouter", PANCAKE_ROUTER);
-    const wbnbAddress = (await pancakeRouter.read.WETH()) as Address;
-    let pairAddress = (await pancakeFactory.read.getPair([tokenAddress, wbnbAddress])) as Address;
+    let pairAddress = (await pancakeFactory.read.getPair([tokenAddress, BSC_USDC])) as Address;
     if (pairAddress === zeroAddress) {
-      await pancakeFactory.write.createPair([tokenAddress, wbnbAddress], { account: deployer.account });
-      pairAddress = (await pancakeFactory.read.getPair([tokenAddress, wbnbAddress])) as Address;
+      await pancakeFactory.write.createPair([tokenAddress, BSC_USDC], { account: deployer.account });
+      pairAddress = (await pancakeFactory.read.getPair([tokenAddress, BSC_USDC])) as Address;
     }
     await token.write.setPair([pairAddress], { account: deployer.account });
     await token.write.setMinAmounts([1n, 1n], { account: deployer.account });
 
     const deployerTcgv = await token.read.balanceOf([deployer.account.address]);
     const liqTcgv = deployerTcgv / 2n;
-    const liqBnb = parseEther("5");
-    if (liqTcgv > 0n) {
+    const liqUsdc = 100_000n * 10n ** BigInt(USDC_DECIMALS);
+    const dexDeadline = BigInt((await publicClient.getBlock()).timestamp) + 3600n;
+    if (liqTcgv > 0n && deployerUsdcBal >= liqUsdc) {
       await token.write.approve([wrapper.address as Address, liqTcgv], { account: deployer.account });
-      await wrapper.write.addLiquidityETH([
-        PANCAKE_ROUTER,
-        tokenAddress,
-        liqTcgv,
-        0n,
-        0n,
-        deadline,
-      ], { value: liqBnb, account: deployer.account });
-      console.log(`Liquidity added: ${formatEther(liqTcgv)} TCGV + ${formatEther(liqBnb)} BNB`);
+      await usdc.write.approve([wrapper.address as Address, liqUsdc], { account: deployer.account });
+      await wrapper.write.addLiquidity(
+        [PANCAKE_ROUTER, BSC_USDC, liqTcgv, liqUsdc, 0n, 0n, dexDeadline],
+        { account: deployer.account },
+      );
+      console.log(`Liquidity added: ${formatEther(liqTcgv)} TCGV + ${formatEther(liqUsdc)} USDC`);
     }
 
-    const path = [wbnbAddress, tokenAddress];
-    const minOut = 0n;
-    const swapCalldata = await publicClient.encodeFunctionData({
+    const path = [BSC_USDC, tokenAddress];
+    const swapUsdcAmount = 1_000n * 10n ** BigInt(USDC_DECIMALS);
+    await usdc.write.approve([PANCAKE_ROUTER, swapUsdcAmount], { account: trader.account });
+    const swapCalldata = encodeFunctionData({
       abi: pancakeRouter.abi,
-      functionName: "swapExactETHForTokensSupportingFeeOnTransferTokens",
-      args: [minOut, path, trader.account.address, deadline],
+      functionName: "swapExactTokensForTokensSupportingFeeOnTransferTokens",
+      args: [swapUsdcAmount, 0n, path, trader.account.address, dexDeadline],
     });
-    await trader.sendTransaction({
-      to: PANCAKE_ROUTER,
-      data: swapCalldata,
-      value: parseEther("0.01"),
-    });
+    await trader.sendTransaction({ to: PANCAKE_ROUTER, data: swapCalldata, value: 0n });
     const traderTcgvAfter = await token.read.balanceOf([trader.account.address]);
-    console.log("After DEX buy (0.01 BNB): trader TCGV", formatEther(traderTcgvAfter));
+    console.log("After DEX buy (1000 USDC): trader TCGV", formatEther(traderTcgvAfter));
+
+    // --- Phase 7.1: Buy via BuyRouter (USDC) with referrer → TCGR to referrer ---
+    const buyUsdcAmount = 500n * 10n ** BigInt(USDC_DECIMALS);
+    await usdc.write.approve([buyRouter.address as Address, buyUsdcAmount], { account: trader.account });
+    const referrerTcgrBefore = await tcgr.read.balanceOf([deployer.account.address]);
+    await buyRouter.write.buyTCGVWithUSDC([buyUsdcAmount, 0n, dexDeadline, deployer.account.address], {
+      account: trader.account,
+    });
+    const referrerTcgrAfter = await tcgr.read.balanceOf([deployer.account.address]);
+    const tcgrDelta = referrerTcgrAfter - referrerTcgrBefore;
+    console.log("Buy via BuyRouter (USDC) with referrer=deployer: 500 USDC → referrer TCGR:", formatEther(tcgrDelta));
+
+    // --- Phase 7.2: Convert TCGR → TCGV ---
+    const deployerTcgrBal = await tcgr.read.balanceOf([deployer.account.address]);
+    if (deployerTcgrBal > 0n) {
+      const fundAmount = parseEther("5000");
+      const traderTcgvBal = await token.read.balanceOf([trader.account.address]);
+      if (traderTcgvBal >= fundAmount) {
+        await token.write.transfer([converterAddress, fundAmount], { account: trader.account });
+        const convertAmount = deployerTcgrBal / 2n;
+        if (convertAmount > 0n) {
+          const deployerTcgvBefore = await token.read.balanceOf([deployer.account.address]);
+          await converter.write.convert([convertAmount], { account: deployer.account });
+          const deployerTcgvAfter = await token.read.balanceOf([deployer.account.address]);
+          const tcgvOut = deployerTcgvAfter - deployerTcgvBefore;
+          console.log("Convert TCGR→TCGV: burned", formatEther(convertAmount), "TCGR → received", formatEther(tcgvOut), "TCGV (1:1)");
+          if (tcgvOut !== convertAmount) throw new Error(`Converter ratio mismatch: expected ${convertAmount}, got ${tcgvOut}`);
+        }
+      }
+    }
   } catch (e) {
-    console.warn("Phase 7 (DEX) skipped or failed (need BSC fork with PancakeSwap):", e instanceof Error ? e.message : e);
+    console.warn("Phase 7 (DEX) skipped or failed (need BSC fork with PancakeSwap + USDC):", e instanceof Error ? e.message : e);
   }
   console.log();
 
@@ -247,9 +711,10 @@ async function main() {
   console.log("=".repeat(80));
   console.log("Token:      ", tokenAddress);
   console.log("Nexus:      ", nexusTokenAddress);
+  console.log("TCGR (ref): ", tcgrAddress);
   console.log("Founder NFT:", founderNFTAddress);
   console.log("InitialLaunch:", initialLaunchAddress);
-  console.log("Presale → Finalize → Claim → DEX buy completed successfully.");
+  console.log("Presale → Finalize → Claim → DEX buy + referral (TCGR) completed successfully.");
 }
 
 main()

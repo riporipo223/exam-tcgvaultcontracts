@@ -1,42 +1,30 @@
 #!/usr/bin/env node
 /**
- * Run Hardhat coverage with a single compiler by temporarily excluding
- * fork-only contracts (old Solidity versions). Restores them afterward.
+ * Run Hardhat coverage using the main hardhat.config.ts.
+ * Excludes fork-only contracts (WBNB, Pancake*) so we can drop the 0.4.18 compiler
+ * and the injected coverage library (pragma >=0.4.22) compiles with 0.5.16+.
  */
 import { spawnSync } from "child_process";
-import { renameSync, existsSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const CONTRACTS_TEST = join(ROOT, "contracts", "test");
-const FILES = ["WBNB.sol", "PancakeRouter.sol", "PancakeFactory.sol", "PancakePair.sol"];
+const excludeScript = join(ROOT, "scripts", "coverage-exclude-fork-contracts.mjs");
 
-function hide() {
-  for (const f of FILES) {
-    const p = join(CONTRACTS_TEST, f);
-    if (existsSync(p)) renameSync(p, p + ".bak");
-  }
-}
-
-function show() {
-  for (const f of FILES) {
-    const p = join(CONTRACTS_TEST, f);
-    const bak = p + ".bak";
-    if (existsSync(bak)) renameSync(bak, p);
-  }
-}
-
-hide();
 let exitCode = 1;
 try {
+  const hide = spawnSync("node", [excludeScript, "hide"], { cwd: ROOT });
+  if (hide.status !== 0) {
+    console.error("Failed to hide fork contracts for coverage");
+    process.exit(1);
+  }
   const r = spawnSync(
     "yarn",
-    ["hardhat", "test", "--coverage", "--config", "hardhat.coverage.config.ts"],
-    { cwd: ROOT, stdio: "inherit", shell: true }
+    ["hardhat", "test", "--coverage"],
+    { cwd: ROOT, stdio: "inherit", shell: true, env: { ...process.env, COVERAGE: "1" } }
   );
   exitCode = r.status ?? 1;
 } finally {
-  show();
+  spawnSync("node", [excludeScript, "show"], { cwd: ROOT });
 }
 process.exit(exitCode);
