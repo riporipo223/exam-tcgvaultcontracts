@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.27;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "./interfaces/ITCGVaultToken.sol";
-import "./interfaces/ITCGRToken.sol";
-import "./interfaces/IPancakeV2.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ITCGVaultToken} from "./interfaces/ITCGVaultToken.sol";
+import {ITCGRToken} from "./interfaces/ITCGRToken.sol";
+import {IPancakeFactory, IPancakePair, IPancakeRouter02} from "./interfaces/IPancakeV2.sol";
 
 /// @notice Sent when buying with zero USDC.
 error ZeroUSDC();
@@ -31,10 +32,13 @@ error ZeroAddress();
  * @notice Buy and sell TCGV against USDC (stablecoin). Buy: USDC fee 13% (10% vault, 3% marketing), then swap remaining USDC for TCGV; 2% of TCGV burned. User receives rest + NEXUS cashback (30% presale, 10% standard — whitepaper §6).
  *         Referral: 0,5 % en $TCGR au profit du parrain (achats via routeur uniquement, CGU).
  * @dev This contract is excluded from fees in TCGVaultToken. Cashback rate is determined by TCGVaultToken (presaleActive).
+ *      Uses {ReentrancyGuardTransient} (EIP-1153) for buy/sell entrypoints; requires a chain that supports transient storage.
  */
-contract TCGVaultBuyRouter is Ownable {
+contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
     /// @notice 0.5% of USDC value (scaled to 18 decimals) minted as TCGR to referrer for each validated buy.
     uint256 public constant REFERRAL_BP = 50;
+    /// @notice Hard cap for configurable buy/sell tax rates (25%).
+    uint256 public constant MAX_FEE_BP = 2500;
 
     // Fee params (basis points) — defaults reflect current behavior, but are owner-modifiable.
     // Buy: USDC fee split + TCGV burn on output
@@ -60,9 +64,9 @@ contract TCGVaultBuyRouter is Ownable {
     address private immutable _community;
     ITCGRToken private _referralToken;
 
-    event BuyWithUSDC(address indexed buyer, address indexed referrer, uint256 usdcIn, uint256 feeUSDC, uint256 tcgvOut);
-    event ReferralTokenSet(address indexed token);
-    event SellTCGVForUSDC(address indexed seller, uint256 tcgvIn, uint256 feeTCGV, uint256 usdcOut);
+    event BuyWithUSDC(address buyer, address referrer, uint256 usdcIn, uint256 feeUSDC, uint256 tcgvOut);
+    event ReferralTokenSet(address token);
+    event SellTCGVForUSDC(address seller, uint256 tcgvIn, uint256 feeTCGV, uint256 usdcOut);
     event BuyFeeParamsUpdated(uint256 vaultBp, uint256 marketingBp, uint256 communityBp, uint256 tcgvBurnBp);
     event SellFeeParamsUpdated(
         uint256 taxBp,
@@ -72,7 +76,6 @@ contract TCGVaultBuyRouter is Ownable {
         uint256 communityShareBp,
         uint256 burnShareBp
     );
-
     // External getters (private/external pattern)
     function router() external view returns (address) { return _router; }
     function factory() external view returns (address) { return _factory; }
@@ -111,6 +114,16 @@ contract TCGVaultBuyRouter is Ownable {
         _vault = vault_;
         _marketing = marketing_;
         _community = community_;
+        emit ReferralTokenSet(address(0));
+        emit BuyFeeParamsUpdated(_buyVaultBp, _buyMarketingBp, _buyCommunityBp, _buyTcgvBurnBp);
+        emit SellFeeParamsUpdated(
+            _sellTaxBp,
+            _sellVaultShareBp,
+            _sellAutolpShareBp,
+            _sellMarketingShareBp,
+            _sellCommunityShareBp,
+            _sellBurnShareBp
+        );
     }
 
     /**
@@ -131,8 +144,8 @@ contract TCGVaultBuyRouter is Ownable {
         uint256 communityBp,
         uint256 tcgvBurnBp
     ) external onlyOwner {
-        if (vaultBp + marketingBp + communityBp > 10000) revert InvalidFeeParams();
-        if (tcgvBurnBp > 10000) revert InvalidFeeParams();
+        if (vaultBp + marketingBp + communityBp > MAX_FEE_BP) revert InvalidFeeParams();
+        if (tcgvBurnBp > MAX_FEE_BP) revert InvalidFeeParams();
         _buyVaultBp = vaultBp;
         _buyMarketingBp = marketingBp;
         _buyCommunityBp = communityBp;
@@ -152,7 +165,7 @@ contract TCGVaultBuyRouter is Ownable {
         uint256 communityShareBp,
         uint256 burnShareBp
     ) external onlyOwner {
-        if (taxBp > 10000) revert InvalidFeeParams();
+        if (taxBp > MAX_FEE_BP) revert InvalidFeeParams();
         if (vaultShareBp + autolpShareBp + marketingShareBp + communityShareBp + burnShareBp != 10000) {
             revert InvalidFeeParams();
         }
@@ -218,6 +231,7 @@ contract TCGVaultBuyRouter is Ownable {
             // amount0Out/amount1Out are in pair's token0/token1 order
             (uint256 amount0Out, uint256 amount1Out) = input == token0 ? (uint256(0), amountOutput) : (amountOutput, uint256(0));
             address to = i < path.length - 2 ? _pairFor(output, path[i + 2]) : _to;
+            // data byte empty - no callback from pair
             pair.swap(amount0Out, amount1Out, to, "");
         }
     }
@@ -230,7 +244,7 @@ contract TCGVaultBuyRouter is Ownable {
      * @param deadline Swap deadline.
      * @param referrer Parrain (ambassadeur) — receives 0.5% in TCGR; pass address(0) if none.
      */
-    function buyTCGVWithUSDC(uint256 usdcAmount, uint256 amountOutMin, uint256 deadline, address referrer) external {
+    function buyTCGVWithUSDC(uint256 usdcAmount, uint256 amountOutMin, uint256 deadline, address referrer) external nonReentrant {
         if (usdcAmount == 0) revert ZeroUSDC();
         if (deadline < block.timestamp) revert Expired();
 
@@ -305,7 +319,7 @@ contract TCGVaultBuyRouter is Ownable {
     /**
      * @notice Sell TCGV for USDC. Fee (10%) is taken in USDC after the swap: 4% vault, 3% autolp (sent to vault for manual LP add), 1% marketing, 1% community, 1% burn (in TCGV).
      */
-    function sellTCGVForUSDC(uint256 amountIn, uint256 amountOutMin, uint256 deadline) external {
+    function sellTCGVForUSDC(uint256 amountIn, uint256 amountOutMin, uint256 deadline) external nonReentrant {
         if (amountIn == 0) revert ZeroTCGV();
         if (deadline < block.timestamp) revert Expired();
 

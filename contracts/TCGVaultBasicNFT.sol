@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.27;
 
-import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "./interfaces/ITCGVaultStakingVault.sol";
+import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ITCGVaultStakingVault} from "./interfaces/ITCGVaultStakingVault.sol";
 
 /**
  * @title TCGVaultBasicNFT
@@ -32,12 +32,17 @@ contract TCGVaultBasicNFT is ERC721, Ownable {
         return _ownerToTokenId[owner];
     }
 
+    event StakingVaultUpdated(address stakingVault);
+    event BaseURIUpdated(string baseURI);
+
     constructor(address stakingVault_) ERC721("TCG-VAULT Basic", "TCGVB") Ownable(msg.sender) {
         _stakingVault = ITCGVaultStakingVault(stakingVault_);
+        emit StakingVaultUpdated(stakingVault_);
     }
 
     function setBaseURI(string calldata baseURI_) external onlyOwner {
         _baseTokenURI = baseURI_;
+        emit BaseURIUpdated(baseURI_);
     }
 
     function _baseURI() internal view virtual override returns (string memory) {
@@ -46,6 +51,7 @@ contract TCGVaultBasicNFT is ERC721, Ownable {
 
     function setStakingVault(address stakingVault_) external onlyOwner {
         _stakingVault = ITCGVaultStakingVault(stakingVault_);
+        emit StakingVaultUpdated(stakingVault_);
     }
 
     /// @notice Total number of Basic NFTs ever minted (sold). Used by Initial Launch for tracking.

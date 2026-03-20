@@ -4,7 +4,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import hre from "hardhat";
-import { parseEther, parseUnits, zeroAddress } from "viem";
+import { parseEther, parseUnits, getContractAddress, zeroAddress } from "viem";
 
 const { viem, networkHelpers } = await hre.network.connect();
 
@@ -30,38 +30,35 @@ async function deployFixture() {
   const routerAddress = routerContract.address;
   const router = await viem.getContractAt("MockUniswapV2Router", routerAddress);
 
+  const publicClient = await viem.getPublicClient();
+  const n0 = BigInt(await publicClient.getTransactionCount({ address: owner.account.address, blockTag: "pending" }));
+  const futureTcgv = getContractAddress({ from: owner.account.address, nonce: n0 + 1n });
+  const nexusAddr = getContractAddress({ from: owner.account.address, nonce: n0 });
+
+  await viem.deployContract("TCGNexusToken", [futureTcgv], { client: { wallet: owner } });
   const tcgvContract = await viem.deployContract("TCGVaultToken", [
     routerAddress,
     vault.account.address,
     marketing.account.address,
     community.account.address,
-    "0x0000000000000000000000000000000000000000",
+    nexusAddr,
+    owner.account.address,
   ], { client: { wallet: owner } });
   const tcgvAddress = tcgvContract.address;
   const tcgv = await viem.getContractAt("TCGVaultToken", tcgvAddress);
 
-  const nexusContract = await viem.deployContract("TCGNexusToken", [tcgvAddress], { client: { wallet: owner } });
-  const nexusAddress = nexusContract.address;
-  const nexus = await viem.getContractAt("TCGNexusToken", nexusAddress);
-
-  await tcgv.write.setAddresses([
-    vault.account.address,
-    marketing.account.address,
-    community.account.address,
-    nexusAddress,
-  ], { account: owner.account });
+  const nexus = await viem.getContractAt("TCGNexusToken", nexusAddr);
+  const nexusAddress = nexusAddr;
 
   // Create USDC/TCGV pair and seed liquidity directly via pair.mint
   await factory.write.createPair([tcgvAddress, usdcAddress], { account: owner.account });
   const pairAddress = await factory.read.getPair([tcgvAddress, usdcAddress]);
   const pair = await viem.getContractAt("MockUniswapV2Pair", pairAddress);
-  await tcgv.write.setPair([pairAddress], { account: owner.account });
+  await tcgv.write.setPair([pairAddress, true], { account: owner.account });
 
-  const mockPresaleLaunch = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], { client: { wallet: owner } });
-  await tcgv.write.setPresaleFinalizer([mockPresaleLaunch.address], { account: owner.account });
   const mintAmount = parseEther("1000000");
   const liqAmount = parseEther("900000");
-  await mockPresaleLaunch.write.mintPresale([tcgvAddress, owner.account.address, mintAmount], { account: owner.account });
+  await tcgv.write.mintPresale([owner.account.address, mintAmount], { account: owner.account });
 
   const buyRouter = await viem.deployContract("TCGVaultBuyRouter", [
     routerAddress,
@@ -268,28 +265,28 @@ describe("TCGVaultBuyRouter", function () {
     assert.strictEqual(await buyRouter.read.sellTaxBp(), 1000n);
   });
 
-  it("setBuyFeeParams reverts when vaultBp + marketingBp + communityBp > 10000", async function () {
+  it("setBuyFeeParams reverts when vaultBp + marketingBp + communityBp > 25%", async function () {
     const { buyRouter, owner } = await networkHelpers.loadFixture(deployFixture);
     await viem.assertions.revertWithCustomError(
-      buyRouter.write.setBuyFeeParams([5000n, 5000n, 100n, 0n], { account: owner.account }),
+      buyRouter.write.setBuyFeeParams([2000n, 400n, 101n, 0n], { account: owner.account }),
       buyRouter,
       "InvalidFeeParams"
     );
   });
 
-  it("setBuyFeeParams reverts when tcgvBurnBp > 10000", async function () {
+  it("setBuyFeeParams reverts when tcgvBurnBp > 25%", async function () {
     const { buyRouter, owner } = await networkHelpers.loadFixture(deployFixture);
     await viem.assertions.revertWithCustomError(
-      buyRouter.write.setBuyFeeParams([1000n, 500n, 500n, 10001n], { account: owner.account }),
+      buyRouter.write.setBuyFeeParams([1000n, 500n, 500n, 2501n], { account: owner.account }),
       buyRouter,
       "InvalidFeeParams"
     );
   });
 
-  it("setSellFeeParams reverts when taxBp > 10000", async function () {
+  it("setSellFeeParams reverts when taxBp > 25%", async function () {
     const { buyRouter, owner } = await networkHelpers.loadFixture(deployFixture);
     await viem.assertions.revertWithCustomError(
-      buyRouter.write.setSellFeeParams([10001n, 4000n, 3000n, 1000n, 1000n, 1000n], { account: owner.account }),
+      buyRouter.write.setSellFeeParams([2501n, 4000n, 3000n, 1000n, 1000n, 1000n], { account: owner.account }),
       buyRouter,
       "InvalidFeeParams"
     );

@@ -18,6 +18,31 @@ async function expectRevert(promise: Promise<unknown>) {
 
 const ZERO = zeroAddress;
 
+/** Deploy Nexus (minter = predicted TCGV) then TCGV with immutable NEXUS; returns TCGV client. */
+async function deployFreshTcgvWithNexus(
+  owner: Awaited<ReturnType<typeof viem.getWalletClients>>[0],
+  router: `0x${string}`,
+  vault: `0x${string}`,
+  marketing: `0x${string}`,
+  community: `0x${string}`,
+  presaleFinalizer: `0x${string}`
+) {
+  const pc = await viem.getPublicClient();
+  const n0 = BigInt(await pc.getTransactionCount({ address: owner.account.address, blockTag: "pending" }));
+  const futureTcgv = getContractAddress({ from: owner.account.address, nonce: n0 + 1n });
+  const nexusAddr = getContractAddress({ from: owner.account.address, nonce: n0 });
+  await viem.deployContract("TCGNexusToken", [futureTcgv], { client: { wallet: owner } });
+  const tcgvContract = await viem.deployContract("TCGVaultToken", [
+    router,
+    vault,
+    marketing,
+    community,
+    nexusAddr,
+    presaleFinalizer,
+  ], { client: { wallet: owner } });
+  return viem.getContractAt("TCGVaultToken", tcgvContract.address as `0x${string}`);
+}
+
 // Helper to ensure transactions complete in Hardhat
 async function waitForTx(hash: `0x${string}`) {
   const publicClient = await viem.getPublicClient();
@@ -101,31 +126,28 @@ describe("TCGVaultToken", () => {
     routerAddress = routerContract.address as `0x${string}`;
     router = await viem.getContractAt("MockUniswapV2Router", routerAddress);
 
-    // Deploy TCGVaultToken
+    // Deploy mock presale launch first; TCGV stores it as immutable finalizer.
+    mockPresaleLaunch = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], { client: { wallet: owner } });
+
+    // Deploy TCGNexusToken first (minter = predicted TCGV), then TCGV with immutable NEXUS
+    const n0 = BigInt(await publicClient.getTransactionCount({ address: owner.account.address, blockTag: "pending" }));
+    const futureTcgvAddr = getContractAddress({ from: owner.account.address, nonce: n0 + 1n });
+    const expectedNexusAddr = getContractAddress({ from: owner.account.address, nonce: n0 });
+
+    const nexusContract = await viem.deployContract("TCGNexusToken", [futureTcgvAddr], { client: { wallet: owner } });
+    nexusAddress = nexusContract.address as `0x${string}`;
+    nexus = await viem.getContractAt("TCGNexusToken", nexusAddress);
+
     const tcgvContract = await viem.deployContract("TCGVaultToken", [
       routerAddress,
       vault.account.address,
       marketing.account.address,
       community.account.address,
-      ZERO,
+      expectedNexusAddr,
+      mockPresaleLaunch.address as `0x${string}`,
     ], { client: { wallet: owner } });
     tcgvAddress = tcgvContract.address as `0x${string}`;
     tcgv = await viem.getContractAt("TCGVaultToken", tcgvAddress);
-
-    // Deploy TCGNexusToken
-    const nexusContract = await viem.deployContract("TCGNexusToken", [tcgvAddress], { client: { wallet: owner } });
-    nexusAddress = nexusContract.address as `0x${string}`;
-    nexus = await viem.getContractAt("TCGNexusToken", nexusAddress);
-
-    // Set addresses on TCGVaultToken
-    const addrs: [`0x${string}`, `0x${string}`, `0x${string}`, `0x${string}`] = [
-      getAddress(vault.account.address),
-      getAddress(marketing.account.address),
-      getAddress(community.account.address),
-      nexusAddress,
-    ];
-    const setAddrHash = await tcgv.write.setAddresses(addrs, { account: owner.account });
-    await waitForTx(setAddrHash);
 
     // Create TCGV/USDC pair
     const createPairHash = await factory.write.createPair([tcgvAddress as `0x${string}`, usdcAddress], { account: owner.account });
@@ -134,7 +156,7 @@ describe("TCGVaultToken", () => {
     pair = await viem.getContractAt("MockUniswapV2Pair", pairAddress);
 
     // Set pair on token; use min amounts 1 in tests so swap outputs from mock pair always pass (production uses 10_000)
-    const setPairHash = await tcgv.write.setPair([pairAddress], { account: owner.account });
+    const setPairHash = await tcgv.write.setPair([pairAddress, true], { account: owner.account });
     await waitForTx(setPairHash);
     await tcgv.write.setMinAmounts([1n, 1n], { account: owner.account });
 
@@ -142,16 +164,12 @@ describe("TCGVaultToken", () => {
     wrapper = await viem.deployContract("TCGVaultLiquidityWrapper", [tcgvAddress, routerAddress], { client: { wallet: owner } });
     wrapperAddress = wrapper.address as `0x${string}`;
 
-    // Deploy mock presale launch and set as presale finalizer (set once; token reads totalTCGVAllocated from it)
-    mockPresaleLaunch = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], { client: { wallet: owner } });
-    await tcgv.write.setPresaleFinalizer([mockPresaleLaunch.address as `0x${string}`], { account: owner.account });
     // Mint presale tokens to owner for liquidity (no constructor mint; supply is minted during presale / at end).
     // Use 10M so swap outputs exceed minBuyAmount/minSellAmount (10_000) after first test consumes liquidity.
     const presaleMintAmount = parseEther("10000000");
     await mockPresaleLaunch.write.mintPresale([tcgvAddress, owner.account.address, presaleMintAmount], { account: owner.account });
 
-    // Set wrapper as liquidity wrapper (for transient fee-exempt) and exclude from fees
-    await tcgv.write.setLiquidityWrapper([wrapperAddress], { account: owner.account });
+    // Fee-exclude wrapper: LP add (wrapper→pair) and remove (pair→wrapper) must skip TCGV fees
     const setExcludedHash = await tcgv.write.setExcludedFromFees(
       [wrapperAddress, true],
       { account: owner.account }
@@ -350,17 +368,14 @@ describe("TCGVaultToken", () => {
   });
 
   describe("Liquidity wrapper: add/remove without fees", () => {
-    it("wrapper allowedRouters and feeExemptForRouter return true for initial router", async () => {
+    it("wrapper allowedRouters is true for initial router", async () => {
       expect(await wrapper.read.allowedRouters([routerAddress])).to.equal(true);
-      expect(await wrapper.read.feeExemptForRouter([routerAddress])).to.equal(true);
     });
-    it("owner can setAllowedRouter and setFeeExemptForRouter", async () => {
+    it("owner can setAllowedRouter", async () => {
       const otherRouter = user2.account.address;
       expect(await wrapper.read.allowedRouters([otherRouter])).to.equal(false);
       await wrapper.write.setAllowedRouter([otherRouter, true], { account: owner.account });
       expect(await wrapper.read.allowedRouters([otherRouter])).to.equal(true);
-      await wrapper.write.setFeeExemptForRouter([otherRouter, false], { account: owner.account });
-      expect(await wrapper.read.feeExemptForRouter([otherRouter])).to.equal(false);
       await wrapper.write.setAllowedRouter([otherRouter, false], { account: owner.account });
     });
     it("addLiquidity via wrapper does not charge fees on token transfer to pair", async () => {
@@ -593,44 +608,21 @@ describe("TCGVaultToken", () => {
 
     it("finalizePresaleAndRecompute reverts AllocationRecipientsNotSet when recipients not set", async () => {
       const freshMock = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], { client: { wallet: owner } });
-      const freshTcgv = await viem.deployContract("TCGVaultToken", [
+      const freshTcgv = await deployFreshTcgvWithNexus(
+        owner,
         routerAddress,
         vault.account.address,
         marketing.account.address,
         community.account.address,
-        ZERO,
-      ], { client: { wallet: owner } });
-      await freshTcgv.write.setPresaleFinalizer([freshMock.address], { account: owner.account });
+        freshMock.address
+      );
       await expectRevert(
         freshMock.write.finalizePresaleAndRecompute([freshTcgv.address], { account: owner.account })
       );
     });
 
-    it("finalizePresaleAndRecompute reverts PresaleNotFinalized when presaleActive is false", async () => {
-      const freshMock = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], { client: { wallet: owner } });
-      const freshTcgv = await viem.deployContract("TCGVaultToken", [
-        routerAddress,
-        vault.account.address,
-        marketing.account.address,
-        community.account.address,
-        ZERO,
-      ], { client: { wallet: owner } });
-      await freshTcgv.write.setPresaleFinalizer([freshMock.address], { account: owner.account });
-      await freshTcgv.write.setAllocationRecipients([vault.account.address, marketing.account.address, community.account.address], { account: owner.account });
-      await freshTcgv.write.setPresaleActive([false], { account: owner.account });
-      await expectRevert(
-        freshMock.write.finalizePresaleAndRecompute([freshTcgv.address], { account: owner.account })
-      );
-    });
-
-    it("setPresaleFinalizer reverts when already set", async () => {
-      let reverted = false;
-      try {
-        await tcgv.write.setPresaleFinalizer([user1.account.address], { account: owner.account });
-      } catch {
-        reverted = true;
-      }
-      expect(reverted).to.equal(true);
+    it("presaleFinalizer is immutable and set at deployment", async () => {
+      expect(getAddress(await tcgv.read.presaleFinalizer())).to.equal(getAddress(mockPresaleLaunch.address));
     });
 
     it("mintPresale reverts OnlyPresaleFinalizer when caller is not finalizer", async () => {
@@ -648,14 +640,14 @@ describe("TCGVaultToken", () => {
     });
     it("finalizePresaleAndRecompute when presaleSold is 0 emits and returns", async () => {
       const freshMock = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], { client: { wallet: owner } });
-      const freshTcgv = await viem.deployContract("TCGVaultToken", [
+      const freshTcgv = await deployFreshTcgvWithNexus(
+        owner,
         routerAddress,
         vault.account.address,
         marketing.account.address,
         community.account.address,
-        ZERO,
-      ], { client: { wallet: owner } });
-      await freshTcgv.write.setPresaleFinalizer([freshMock.address], { account: owner.account });
+        freshMock.address
+      );
       await freshTcgv.write.setAllocationRecipients([vault.account.address, marketing.account.address, community.account.address], { account: owner.account });
       await freshMock.write.finalizePresaleAndRecompute([freshTcgv.address], { account: owner.account });
       expect(await freshTcgv.read.supplyRecomputed()).to.equal(true);
@@ -847,7 +839,8 @@ describe("TCGVaultToken", () => {
           ZERO,
           marketing.account.address,
           community.account.address,
-          ZERO,
+          user1.account.address,
+          user1.account.address,
         ], { client: { wallet: owner } });
       } catch {
         reverted = true;
@@ -855,20 +848,87 @@ describe("TCGVaultToken", () => {
       expect(reverted).to.equal(true);
     });
 
-    it("setPair reverts when pair is zero", async () => {
-      await expectRevert(tcgv.write.setPair([ZERO], { account: owner.account }));
+    it("constructor reverts ZeroAddress when nexus is zero", async () => {
+      let reverted = false;
+      try {
+        await viem.deployContract("TCGVaultToken", [
+          routerAddress,
+          vault.account.address,
+          marketing.account.address,
+          community.account.address,
+          ZERO,
+          user1.account.address,
+        ], { client: { wallet: owner } });
+      } catch {
+        reverted = true;
+      }
+      expect(reverted).to.equal(true);
     });
 
-    it("setPairStatus success: owner sets and unsets pair", async () => {
-      await tcgv.write.setPairStatus([pairAddress, false], { account: owner.account });
+    it("constructor reverts ZeroAddress when dex router is zero", async () => {
+      let reverted = false;
+      try {
+        await viem.deployContract("TCGVaultToken", [
+          ZERO,
+          vault.account.address,
+          marketing.account.address,
+          community.account.address,
+          user1.account.address,
+          user1.account.address,
+        ], { client: { wallet: owner } });
+      } catch {
+        reverted = true;
+      }
+      expect(reverted).to.equal(true);
+    });
+
+    it("dexFactoryForRouter records factory for initial router; setDexRouter adds another router", async () => {
+      expect(getAddress(await tcgv.read.dexFactoryForRouter([routerAddress]))).to.equal(
+        getAddress(factoryAddress)
+      );
+      const router2Contract = await viem.deployContract("MockUniswapV2Router", [factoryAddress, wethAddress], {
+        client: { wallet: owner },
+      });
+      const router2 = router2Contract.address as `0x${string}`;
+      await tcgv.write.setDexRouter([router2, true], { account: owner.account });
+      expect(getAddress(await tcgv.read.dexFactoryForRouter([router2]))).to.equal(getAddress(factoryAddress));
+      expect(await tcgv.read.isExcludedFromFees([router2])).to.equal(true);
+    });
+
+    it("setDexRouter(false) clears factory mapping and fee exclusion", async () => {
+      const router2Contract = await viem.deployContract("MockUniswapV2Router", [factoryAddress, wethAddress], {
+        client: { wallet: owner },
+      });
+      const router2 = router2Contract.address as `0x${string}`;
+      await tcgv.write.setDexRouter([router2, true], { account: owner.account });
+      await tcgv.write.setDexRouter([router2, false], { account: owner.account });
+      expect(await tcgv.read.dexFactoryForRouter([router2])).to.equal(ZERO);
+      expect(await tcgv.read.isExcludedFromFees([router2])).to.equal(false);
+    });
+
+    it("setDexRouter reverts when router is zero", async () => {
+      await expectRevert(tcgv.write.setDexRouter([ZERO, true], { account: owner.account }));
+    });
+
+    it("setDexRouter reverts when not admin", async () => {
+      await expectRevert(tcgv.write.setDexRouter([routerAddress, false], { account: user1.account }));
+    });
+
+    it("setPair reverts when pair is zero", async () => {
+      await expectRevert(tcgv.write.setPair([ZERO, true], { account: owner.account }));
+      await expectRevert(tcgv.write.setPair([ZERO, false], { account: owner.account }));
+    });
+
+    it("setPair success: owner enables and disables pair", async () => {
+      await tcgv.write.setPair([pairAddress, false], { account: owner.account });
       expect(await tcgv.read.isPair([pairAddress])).to.equal(false);
-      await tcgv.write.setPairStatus([pairAddress, true], { account: owner.account });
+      await tcgv.write.setPair([pairAddress, true], { account: owner.account });
       expect(await tcgv.read.isPair([pairAddress])).to.equal(true);
     });
 
-    it("setPairStatus reverts when not owner", async () => {
+    it("setPair reverts when not admin", async () => {
       await expectRevert(
-        tcgv.write.setPairStatus([pairAddress, false], { account: user1.account })
+        tcgv.write.setPair([pairAddress, false], { account: user1.account })
       );
     });
 
@@ -893,25 +953,23 @@ describe("TCGVaultToken", () => {
 
     it("setAddresses reverts ZeroAddress when any address is zero", async () => {
       await expectRevert(
-        tcgv.write.setAddresses([ZERO, marketing.account.address, community.account.address, nexusAddress], { account: owner.account })
+        tcgv.write.setAddresses([ZERO, marketing.account.address, community.account.address], { account: owner.account })
       );
     });
 
-    it("setAddresses success: owner updates vault/marketing/community/nexus", async () => {
-      await tcgv.write.setAddresses([
-        user1.account.address,
-        user2.account.address,
-        community.account.address,
-        nexusAddress,
-      ], { account: owner.account });
+    it("setAddresses success: owner updates vault/marketing/community (nexus unchanged)", async () => {
+      const nexusBefore = getAddress(await tcgv.read.nexusToken());
+      await tcgv.write.setAddresses(
+        [user1.account.address, user2.account.address, community.account.address],
+        { account: owner.account }
+      );
       expect(getAddress(await tcgv.read.vaultAddress())).to.equal(getAddress(user1.account.address));
       expect(getAddress(await tcgv.read.marketingAddress())).to.equal(getAddress(user2.account.address));
-      await tcgv.write.setAddresses([
-        vault.account.address,
-        marketing.account.address,
-        community.account.address,
-        nexusAddress,
-      ], { account: owner.account });
+      expect(getAddress(await tcgv.read.nexusToken())).to.equal(nexusBefore);
+      await tcgv.write.setAddresses(
+        [vault.account.address, marketing.account.address, community.account.address],
+        { account: owner.account }
+      );
     });
 
     it("setExcludedFromFees success: owner excludes then includes", async () => {
@@ -921,9 +979,9 @@ describe("TCGVaultToken", () => {
       expect(await tcgv.read.isExcludedFromFees([user1.account.address])).to.equal(false);
     });
 
-    it("setBuyFeeParams reverts InvalidFeeParams when buyTaxBp > 10000", async () => {
+    it("setBuyFeeParams reverts InvalidFeeParams when buyTaxBp > 25%", async () => {
       await expectRevert(
-        tcgv.write.setBuyFeeParams([10001n, 5000n, 3000n, 2000n], { account: owner.account })
+        tcgv.write.setBuyFeeParams([2501n, 5000n, 3000n, 2000n], { account: owner.account })
       );
     });
 
@@ -940,9 +998,9 @@ describe("TCGVaultToken", () => {
       await tcgv.write.setBuyFeeParams([BUY_TAX_BP, 6000n, 2500n, 1500n], { account: owner.account });
     });
 
-    it("setSellFeeParams reverts InvalidFeeParams when sellTaxBp > 10000", async () => {
+    it("setSellFeeParams reverts InvalidFeeParams when sellTaxBp > 25%", async () => {
       await expectRevert(
-        tcgv.write.setSellFeeParams([10001n, 4000n, 2000n, 2000n, 1000n, 1000n], { account: owner.account })
+        tcgv.write.setSellFeeParams([2501n, 4000n, 2000n, 2000n, 1000n, 1000n], { account: owner.account })
       );
     });
 
@@ -974,19 +1032,6 @@ describe("TCGVaultToken", () => {
       ], { account: owner.account });
     });
 
-    it("setLiquidityWrapper success: owner sets wrapper", async () => {
-      await tcgv.write.setLiquidityWrapper([user1.account.address], { account: owner.account });
-      expect(getAddress(await tcgv.read.liquidityWrapper())).to.equal(getAddress(user1.account.address));
-      await tcgv.write.setLiquidityWrapper([wrapperAddress], { account: owner.account });
-    });
-
-    it("setTransientFeeExempt reverts when not liquidity wrapper", async () => {
-      await tcgv.write.setLiquidityWrapper([wrapperAddress], { account: owner.account });
-      await expectRevert(
-        tcgv.write.setTransientFeeExempt([true], { account: user1.account })
-      );
-    });
-
     it("setMinAmounts reverts when not owner", async () => {
       await expectRevert(
         tcgv.write.setMinAmounts([0n, 0n], { account: user1.account })
@@ -995,7 +1040,7 @@ describe("TCGVaultToken", () => {
 
     it("setBlacklisted reverts when not owner", async () => {
       await expectRevert(
-        tcgv.write.setBlacklisted([user1.account.address, true], { account: user1.account })
+        tcgv.write.setBlacklisted([user1.account.address, true, "fraud"], { account: user1.account })
       );
     });
 
@@ -1005,10 +1050,6 @@ describe("TCGVaultToken", () => {
 
     it("unpause reverts when not owner", async () => {
       await expectRevert(tcgv.write.unpause({ account: user1.account }));
-    });
-
-    it("setPresaleActive reverts when not owner", async () => {
-      await expectRevert(tcgv.write.setPresaleActive([false], { account: user1.account }));
     });
 
     it("setBuyRouter with zero does not set isExcludedFromFees", async () => {
@@ -1115,31 +1156,17 @@ describe("TCGVaultToken", () => {
       await tcgv.write.setCashbackEnabled([true], { account: owner.account });
     });
 
-    it("_distributeCashback early return when nexusToken is zero (buy still applies fees)", async () => {
-      await tcgv.write.setAddresses([
-        vault.account.address,
-        marketing.account.address,
-        community.account.address,
-        ZERO,
-      ], { account: owner.account });
-      const nexusBefore = await nexus.read.balanceOf([user2.account.address]);
-      const usdcIn = parseUnits("10", 6);
-      const path = [usdcAddress, tcgvAddress] as const;
-      await usdc.write.approve([routerAddress, usdcIn], { account: user2.account });
-      await router.write.swapExactTokensForTokens([
-        usdcIn,
-        0n,
-        path,
-        user2.account.address,
-        (await publicClient.getBlock()).timestamp + 300n
-      ], { account: user2.account });
-      expect(await nexus.read.balanceOf([user2.account.address])).to.equal(nexusBefore);
-      await tcgv.write.setAddresses([
-        vault.account.address,
-        marketing.account.address,
-        community.account.address,
-        nexusAddress,
-      ], { account: owner.account });
+    it("setAddresses does not change nexusToken (cashback recipient stays fixed)", async () => {
+      const nexusAddr = getAddress(await tcgv.read.nexusToken());
+      await tcgv.write.setAddresses(
+        [user1.account.address, user2.account.address, community.account.address],
+        { account: owner.account }
+      );
+      expect(getAddress(await tcgv.read.nexusToken())).to.equal(nexusAddr);
+      await tcgv.write.setAddresses(
+        [vault.account.address, marketing.account.address, community.account.address],
+        { account: owner.account }
+      );
     });
 
     it("_distributeCashback early return when buy amount gives zero cashback", async () => {
@@ -1180,26 +1207,45 @@ describe("TCGVaultToken", () => {
   describe("Blacklist and Pause", () => {
     it("owner can setBlacklisted and unblacklist", async () => {
       expect(await tcgv.read.isBlacklisted([user2.account.address])).to.equal(false);
-      await tcgv.write.setBlacklisted([user2.account.address, true], { account: owner.account });
+      await tcgv.write.setBlacklisted([user2.account.address, true, "sybil"], { account: owner.account });
       expect(await tcgv.read.isBlacklisted([user2.account.address])).to.equal(true);
-      await tcgv.write.setBlacklisted([user2.account.address, false], { account: owner.account });
+      await tcgv.write.setBlacklisted([user2.account.address, false, ""], { account: owner.account });
       expect(await tcgv.read.isBlacklisted([user2.account.address])).to.equal(false);
     });
 
+    it("setBlacklisted true seizes full TCGV balance to vault", async () => {
+      const vaultAddr = (await tcgv.read.vaultAddress()) as `0x${string}`;
+      const seizeAmount = parseEther("100");
+      await mockPresaleLaunch.write.mintPresale([tcgvAddress, user2.account.address, seizeAmount], {
+        account: owner.account,
+      });
+      const vaultBefore = await tcgv.read.balanceOf([vaultAddr]);
+      await tcgv.write.setBlacklisted([user2.account.address, true, "manipulation"], { account: owner.account });
+      expect(await tcgv.read.balanceOf([user2.account.address])).to.equal(0n);
+      expect(await tcgv.read.balanceOf([vaultAddr])).to.equal(vaultBefore + seizeAmount);
+      await tcgv.write.setBlacklisted([user2.account.address, false, ""], { account: owner.account });
+    });
+
+    it("setBlacklisted reverts when reason is empty while enabling blacklist", async () => {
+      await expectRevert(
+        tcgv.write.setBlacklisted([user2.account.address, true, ""], { account: owner.account })
+      );
+    });
+
     it("transfer reverts Blacklisted when sender is blacklisted", async () => {
-      await tcgv.write.setBlacklisted([user1.account.address, true], { account: owner.account });
+      await tcgv.write.setBlacklisted([user1.account.address, true, "fraud"], { account: owner.account });
       await expectRevert(
         tcgv.write.transfer([user2.account.address, parseEther("1")], { account: user1.account })
       );
-      await tcgv.write.setBlacklisted([user1.account.address, false], { account: owner.account });
+      await tcgv.write.setBlacklisted([user1.account.address, false, ""], { account: owner.account });
     });
 
     it("transfer reverts Blacklisted when recipient is blacklisted", async () => {
-      await tcgv.write.setBlacklisted([user2.account.address, true], { account: owner.account });
+      await tcgv.write.setBlacklisted([user2.account.address, true, "sanctions"], { account: owner.account });
       await expectRevert(
         tcgv.write.transfer([user2.account.address, parseEther("1")], { account: user1.account })
       );
-      await tcgv.write.setBlacklisted([user2.account.address, false], { account: owner.account });
+      await tcgv.write.setBlacklisted([user2.account.address, false, ""], { account: owner.account });
     });
 
     it("owner can pause and unpause", async () => {
@@ -1267,14 +1313,14 @@ describe("TCGVaultToken", () => {
 
     it("mintPresale reverts ContractPaused when paused", async () => {
       const freshMock = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], { client: { wallet: owner } });
-      const freshTcgv = await viem.deployContract("TCGVaultToken", [
+      const freshTcgv = await deployFreshTcgvWithNexus(
+        owner,
         routerAddress,
         vault.account.address,
         marketing.account.address,
         community.account.address,
-        ZERO,
-      ], { client: { wallet: owner } });
-      await freshTcgv.write.setPresaleFinalizer([freshMock.address], { account: owner.account });
+        freshMock.address
+      );
       await freshTcgv.write.pause({ account: owner.account });
       await expectRevert(
         freshMock.write.mintPresale([freshTcgv.address, user1.account.address, parseEther("100")], { account: owner.account })
@@ -1285,14 +1331,14 @@ describe("TCGVaultToken", () => {
   describe("finalizePresaleAndRecompute scaling path (sum > toMint)", () => {
     it("scales allocation when toMint < sum", async () => {
       const freshMock = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], { client: { wallet: owner } });
-      const freshTcgv = await viem.deployContract("TCGVaultToken", [
+      const freshTcgv = await deployFreshTcgvWithNexus(
+        owner,
         routerAddress,
         vault.account.address,
         marketing.account.address,
         community.account.address,
-        ZERO,
-      ], { client: { wallet: owner } });
-      await freshTcgv.write.setPresaleFinalizer([freshMock.address], { account: owner.account });
+        freshMock.address
+      );
       await freshTcgv.write.setAllocationRecipients([
         vault.account.address,
         marketing.account.address,

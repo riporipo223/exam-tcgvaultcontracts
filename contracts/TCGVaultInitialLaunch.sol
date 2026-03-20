@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.27;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "./interfaces/ITCGVaultFounderNFT.sol";
-import "./interfaces/ITCGNexusToken.sol";
-import "./interfaces/ITCGVaultToken.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ITCGVaultFounderNFT} from "./interfaces/ITCGVaultFounderNFT.sol";
+import {ITCGNexusToken} from "./interfaces/ITCGNexusToken.sol";
+import {ITCGVaultToken} from "./interfaces/ITCGVaultToken.sol";
 
 /**
  * @title TCGVaultInitialLaunch
@@ -57,9 +57,10 @@ contract TCGVaultInitialLaunch is Ownable, ReentrancyGuard {
         return (u.tcgvAllocated, u.tcgvClaimed);
     }
 
-    event Bought(address indexed user, uint256 usdcAmount, uint256 tcgvAllocated);
-    event Claimed(address indexed user, uint256 amount);
+    event Bought(address user, uint256 usdcAmount, uint256 tcgvAllocated);
+    event Claimed(address user, uint256 amount);
     event Finalized(uint256 tgeTimestamp);
+    event TreasuryUpdated(address treasury);
 
     constructor(address tcgv_, address usdc_, address founderNFT_, address nexusToken_, address treasury_) Ownable(msg.sender) {
         if (nexusToken_ == address(0)) revert ZeroNexusToken();
@@ -68,10 +69,12 @@ contract TCGVaultInitialLaunch is Ownable, ReentrancyGuard {
         _founderNFT = ITCGVaultFounderNFT(founderNFT_);
         _nexusToken = ITCGNexusToken(nexusToken_);
         _treasury = treasury_ != address(0) ? treasury_ : msg.sender;
+        emit TreasuryUpdated(_treasury);
     }
 
     function setTreasury(address treasury_) external onlyOwner {
         _treasury = treasury_;
+        emit TreasuryUpdated(treasury_);
     }
 
     /// @notice End of presale: 120h after the 245th Founder NFT sold (whitepaper §6 — compte à rebours 120h).

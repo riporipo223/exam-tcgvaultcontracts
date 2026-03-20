@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.27;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /**
  * @title TCGRToken (TCGR)
@@ -30,12 +30,16 @@ contract TCGRToken is ERC20, Ownable {
         return _converter;
     }
 
-    event ReferralMinted(address indexed referrer, uint256 amount);
-    event Converted(address indexed account, uint256 amount);
+    event ReferralMinted(address referrer, uint256 amount);
+    event Converted(address account, uint256 amount);
+    event MinterUpdated(address minter);
+    event ConverterUpdated(address converter);
 
     constructor(address minter_) ERC20("TCG-Referral", "TCGR") Ownable(msg.sender) {
         if (minter_ == address(0)) revert ZeroAddress();
         _minter = minter_;
+        emit MinterUpdated(minter_);
+        emit ConverterUpdated(address(0));
     }
 
     /**
@@ -44,6 +48,7 @@ contract TCGRToken is ERC20, Ownable {
     function setMinter(address minter_) external onlyOwner {
         if (minter_ == address(0)) revert ZeroAddress();
         _minter = minter_;
+        emit MinterUpdated(minter_);
     }
 
     /**
@@ -51,6 +56,7 @@ contract TCGRToken is ERC20, Ownable {
      */
     function setConverter(address converter_) external onlyOwner {
         _converter = converter_;
+        emit ConverterUpdated(converter_);
     }
 
     /**

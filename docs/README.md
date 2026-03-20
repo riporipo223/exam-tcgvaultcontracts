@@ -31,25 +31,17 @@ The whitepaper §7 describes **Founder Edition** NFTs (500) and **Édition basiq
 
 ## Deployment Steps
 
-1. **Deploy TCGVaultToken first** (with `nexusToken = address(0)`). Name, symbol and supply are fixed in contract (whitepaper).
+NEXUS is **immutable** on `TCGVaultToken` (constructor arg). `TCGNexusToken` needs the TCGV address as minter, so deploy in this order using the **predicted** TCGV address (Create address for `nonce` and `nonce+1` on the deployer account):
+
+1. **Deploy TCGNexusToken** with `minter = predictedTCGVAddress`.
+   ```solidity
+   TCGNexusToken nexusToken = new TCGNexusToken(predictedTCGVAddress);
+   ```
+
+2. **Deploy TCGVaultToken** with `nexusToken = address(nexusToken)` (must match the address from step 1). Name, symbol and supply are fixed in contract (whitepaper).
    ```solidity
    TCGVaultToken token = new TCGVaultToken(
-       pancakeRouterAddress,
-       vaultAddress,
-       marketingAddress,
-       communityAddress,
-       address(0)  // nexusToken set later via setAddresses
-   );
-   ```
-
-2. **Deploy TCGNexusToken** with minter = TCGVaultToken (immutable). Name and symbol fixed in contract (whitepaper).
-   ```solidity
-   TCGNexusToken nexusToken = new TCGNexusToken(address(token));
-   ```
-
-3. **Set Nexus token on TCGVaultToken:**
-   ```solidity
-   token.setAddresses(
+       dexRouterAddress,
        vaultAddress,
        marketingAddress,
        communityAddress,
@@ -57,19 +49,30 @@ The whitepaper §7 describes **Founder Edition** NFTs (500) and **Édition basiq
    );
    ```
 
-4. **Add initial liquidity to PancakeSwap** and call `token.setPair(pairAddress)` to register the pair.
+3. **Add initial liquidity** on your DEX and call `token.setPair(pairAddress, true)` to register the taxable pair (use `active = false` to disable a pool).
 
-5. **Deploy TCGVaultBuyRouter** (optional — for fee-in-BNB path) and set it on the token:
+4. **Fee-exclude the liquidity wrapper** via `token.setExcludedFromFees(wrapperAddress, true)` so LP add/remove path (wrapper↔pair) is not taxed as swap. The wrapper withdraws to itself on remove, then forwards to the user.
+
+5. **Deploy TCGVaultBuyRouter** (optional — stablecoin path on BSC) and set it on the token:
    ```solidity
    TCGVaultBuyRouter buyRouter = new TCGVaultBuyRouter(
-       pancakeRouterAddress,
-       address(token),
+       dexRouterAddress,
+       usdcAddress,
+       ITCGVaultToken(address(token)),
        vaultAddress,
-       marketingAddress
+       marketingAddress,
+       communityAddress
    );
    token.setBuyRouter(address(buyRouter));
    ```
-   Users who buy via `buyRouter.buyTCGVWithBNB(amountOutMin, deadline){ value: bnb }` pay 13% fee in BNB (10% vault, 3% marketing), 2% of TCGV received is burned, and receive the rest + 10% NEXUS cashback.
+   Users who buy via `buyTCGVWithUSDC` follow the router’s USDC fee + swap + burn + NEXUS cashback rules (see `TCGVaultBuyRouter` comments).
+
+### BSC Testnet (chainId 97)
+
+Script: `yarn deploy:bsctest` → `scripts/deployBscTestnet.ts` on Hardhat network `bsctest` (`BSCTEST_RPC_URL` + `TCG_KEY` in keystore).
+
+- PancakeSwap V2 testnet **factory** `0x6725F303b657a9451d8BA641348b6761A6CC7a17`, **router** `0xD99D1c33F9fC3444f8101754aBC46c52416550D1` — see [Pancake docs](https://developer.pancakeswap.finance/contracts/v2/addresses).
+- **USDC:** BSC testnet has no single canonical Circle USDC. The script deploys **`MockUSDC`** (6 decimals, open `mint`) unless you set **`USDC_ADDRESS`** to an existing token.
 
 ## Fee Structure
 
@@ -88,7 +91,7 @@ The whitepaper §7 describes **Founder Edition** NFTs (500) and **Édition basiq
 
 1. **Pair Detection:** The contract detects buys/sells by checking if transfers are to/from the PancakeSwap pair address.
 
-2. **Router Support:** The contract supports both router-based swaps and direct swaps through PancakeSwap.
+2. **DEX routers:** The constructor registers one V2-style router (`dexFactoryForRouter[router] = router.factory()`). Add or remove more with `setDexRouter(router, active)` (emits `DexRouterUpdated`). Registered routers are fee-excluded. Taxed swaps are still driven by `isPair`, not by this mapping.
 
 3. **Cashback:** 10% cashback in NEXUS on buy only (whitepaper: la vente ne génère pas de Cashback). NEXUS is Soulbound. TCGNexusToken’s minter is set at deployment to TCGVaultToken and is immutable (no setter).
 
@@ -96,7 +99,7 @@ The whitepaper §7 describes **Founder Edition** NFTs (500) and **Édition basiq
 
 5. **Minimum amounts:** Buy and sell transfers below `minBuyAmount` / `minSellAmount` revert with `MinAmountNotMet` so fee computation is always meaningful. Owner can set these via `setMinAmounts`. Default is 10_000 (wei).
 
-6. **Exclusions:** Owner, contract itself, and router are excluded from fees by default. Additional addresses can be excluded via `setExcludedFromFees`.
+6. **Exclusions:** The token contract itself and the initial DEX router are excluded from fees by default; more routers added via `setDexRouter` are excluded too. Other addresses via `setExcludedFromFees` (including the owner if you choose to set it explicitly).
 
 ## Security Considerations
 
@@ -107,21 +110,25 @@ The whitepaper §7 describes **Founder Edition** NFTs (500) and **Édition basiq
 
 ## Functions
 
-### Owner Functions
-- `setPair(address)` - Set PancakeSwap pair address
-- `setPairStatus(address, bool)` - Add/remove pair addresses
-- `setAddresses(...)` - Update fee recipient addresses
-- `setExcludedFromFees(address, bool)` - Exclude/include addresses from fees
+### Admin functions (`DEFAULT_ADMIN_ROLE`, granted to deployer)
+- `setDexRouter(address, bool)` - Register another V2 router (stores `factory()`, fee-excludes it) or remove one (`DexRouterUpdated`)
+- `setPair(address, bool)` - Register or disable a V2 pool for buy/sell fee logic (`PairActiveUpdated`)
+- `setAddresses(vault, marketing, community)` - Update vault / marketing / community fee recipients; emits `FeeRecipientsUpdated` (**NEXUS address is not updatable**)
+- `setExcludedFromFees(address, bool)` - Exclude/include addresses from fees (emits `ExcludedFromFeesUpdated`; constructor also emits for deployer, token, and DEX router; `setBuyRouter` emits when router is non-zero)
 - `setFeesEnabled(bool)` - Enable/disable fees
 - `setCashbackEnabled(bool)` - Enable/disable cashback
-- `setMinAmounts(uint256, uint256)` - Set minimum buy/sell amounts for fee computation
-- `emergencyWithdraw(address, uint256)` - Emergency withdraw tokens/ETH
+- `setMinAmounts(uint256, uint256)` - Set minimum buy/sell amounts for fee computation  
+- Use OpenZeppelin `AccessControl` `grantRole` / `revokeRole` if you add custom roles later; transfer admin with `grantRole` + `revokeRole` on `DEFAULT_ADMIN_ROLE`.
 
 ### Public Functions
 - Standard ERC20 functions (transfer, approve, etc.)
 
 ## Events
 
-- `FeesDistributed` - Emitted when fees are distributed
-- `CashbackDistributed` - Emitted when cashback is given
-- `LiquidityAdded` - Emitted when liquidity is added
+`TCGVaultToken` emits configuration events whenever state changes, **including in the constructor** (fee recipients, NEXUS, min amounts, fee toggles, buy/sell params, first DEX router, exclusions), so a subgraph can index from block 0 without missing defaults.
+
+Notable events: `FeeRecipientsUpdated`, `MinAmountsUpdated`, `FeesEnabledUpdated`, `CashbackEnabledUpdated`, `PresaleActiveUpdated`, `BuyFeeParamsUpdated`, `SellFeeParamsUpdated`, `DexRouterUpdated`, `ExcludedFromFeesUpdated`, `PairActiveUpdated`, `PresaleFinalizerSet`, `AllocationRecipientsUpdated`, `BuyRouterUpdated`, `Paused` / `Unpaused`, `BlacklistUpdated`, `SupplyRecomputed`, vesting / fee distribution events.
+
+- `FeesDistributed` — Buy/sell fee splits applied
+- `CashbackDistributed` — NEXUS cashback minted
+- `LiquidityAdded` — Legacy / documentation hook (if used)

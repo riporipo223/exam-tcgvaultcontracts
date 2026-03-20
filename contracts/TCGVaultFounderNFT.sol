@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.27;
 
-import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "./interfaces/ITCGNexusToken.sol";
+import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ITCGNexusToken} from "./interfaces/ITCGNexusToken.sol";
 
 /**
  * @title TCGVaultFounderNFT
@@ -50,13 +50,18 @@ contract TCGVaultFounderNFT is ERC721, Ownable, ReentrancyGuard {
     function ownerWave1Mints() external view returns (uint256) { return _ownerWave1Mints; }
     function ownerWave2Mints() external view returns (uint256) { return _ownerWave2Mints; }
 
+    event TreasuryUpdated(address treasury);
+    event BaseURIUpdated(string baseURI);
+
     constructor(address usdc_, address nexusToken_, address treasury_)
         ERC721("TCG-VAULT Founder", "TCGVF")
         Ownable(msg.sender)
     {
+        if (nexusToken_ == address(0) || treasury_ == address(0)) revert ZeroAddress();
         _usdc = IERC20(usdc_);
         _nexusToken = ITCGNexusToken(nexusToken_);
-        _treasury = treasury_ != address(0) ? treasury_ : msg.sender;
+        _treasury = treasury_;
+        emit TreasuryUpdated(treasury_);
     }
 
     /// @notice Number of Founder NFTs sold (paid mints). Drives presale price wave and 120h countdown.
@@ -73,11 +78,14 @@ contract TCGVaultFounderNFT is ERC721, Ownable, ReentrancyGuard {
     }
 
     function setTreasury(address treasury_) external onlyOwner {
+        if (treasury_ == address(0)) revert ZeroAddress();
         _treasury = treasury_;
+        emit TreasuryUpdated(treasury_);
     }
 
     function setBaseURI(string calldata baseURI_) external onlyOwner {
         _baseTokenURI = baseURI_;
+        emit BaseURIUpdated(baseURI_);
     }
 
     function _baseURI() internal view virtual override returns (string memory) {
@@ -118,11 +126,12 @@ contract TCGVaultFounderNFT is ERC721, Ownable, ReentrancyGuard {
         if (tokenId == WAVE1_SIZE - 1) _wave2StartTimestamp = block.timestamp; // 250th sold (0-indexed: 249)
         _usdc.transferFrom(msg.sender, _treasury, price);
         uint256 nexusAmount = (price * NEXUS_BONUS_BP * 1e18) / (10000 * 1e6);
-        if (nexusAmount > 0 && address(_nexusToken) != address(0)) {
+        if (nexusAmount > 0) {
             _nexusToken.mintPresaleBonus(msg.sender, nexusAmount);
         }
         _safeMint(msg.sender, tokenId);
     }
+    error ZeroAddress();
     error ExceedsSupply();
     error OwnerWaveQuotaExceeded();
     error ReservedForOwner();

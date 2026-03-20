@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.27;
 
-import "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "./interfaces/ITCGVaultBasicNFT.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ITCGVaultBasicNFT} from "./interfaces/ITCGVaultBasicNFT.sol";
 
 /**
  * @title TCGVaultStakingVault
@@ -12,6 +13,8 @@ import "./interfaces/ITCGVaultBasicNFT.sol";
  *   On withdraw/redeem, if owner's share balance falls below minStakeForBasicNFT, their Basic NFT(s) are burned (whitepaper §7.2).
  */
 contract TCGVaultStakingVault is ERC4626, Ownable {
+    event MinStakeForBasicNFTUpdated(uint256 minShares);
+    event BasicNFTContractUpdated(address basicNFT);
     /// @notice Minimum shares required to hold a Basic NFT. Below this, Basic NFT is burned on withdraw.
     uint256 private _minStakeForBasicNFT;
     /// @notice Basic NFT contract to call when stake drops below minimum.
@@ -30,14 +33,17 @@ contract TCGVaultStakingVault is ERC4626, Ownable {
         ERC4626(asset_)
         ERC20("TCG-VAULT Staked TCGV", "sTCGV")
         Ownable(msg.sender)
-    {}
+    {
+    }
 
     function setMinStakeForBasicNFT(uint256 minShares) external onlyOwner {
         _minStakeForBasicNFT = minShares;
+        emit MinStakeForBasicNFTUpdated(minShares);
     }
 
     function setBasicNFTContract(address basicNFT_) external onlyOwner {
         _basicNFTContract = basicNFT_;
+        emit BasicNFTContractUpdated(basicNFT_);
     }
 
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal virtual override {

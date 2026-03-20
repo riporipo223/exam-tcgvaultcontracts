@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.27;
 
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "./interfaces/IPancakeV2.sol";
-import "./interfaces/ITCGNexusToken.sol";
-import "./interfaces/ITCGVaultInitialLaunch.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {IPancakeRouter} from "./interfaces/IPancakeV2.sol";
+import {ITCGNexusToken} from "./interfaces/ITCGNexusToken.sol";
+import {ITCGVaultInitialLaunch} from "./interfaces/ITCGVaultInitialLaunch.sol";
 
 /// @notice Pair address cannot be zero.
 error PairZeroAddress();
@@ -15,16 +14,12 @@ error PairZeroAddress();
 error MinAmountNotMet(uint256 amount, uint256 minimum);
 /// @notice Only the buy router can call this.
 error OnlyBuyRouter();
-/// @notice Only the liquidity wrapper can call setTransientFeeExempt.
-error OnlyLiquidityWrapper();
 /// @notice Only the presale finalizer (e.g. launch contract) can call this.
 error OnlyPresaleFinalizer();
 /// @notice Supply already recomputed (one-time).
 error SupplyAlreadyRecomputed();
 /// @notice Presale not finalized yet.
 error PresaleNotFinalized();
-/// @notice Presale finalizer can only be set once.
-error PresaleFinalizerAlreadySet();
 /// @notice Allocation recipients (liquidity, team, ops) must be set before recomputeSupplyAndBurn.
 error AllocationRecipientsNotSet();
 /// @notice Fee recipient address cannot be zero.
@@ -37,15 +32,19 @@ error NoOpsVestingToClaim();
 error Blacklisted();
 /// @notice Contract is paused for security emergency.
 error ContractPaused();
+/// @notice Blacklist reason is required when enabling blacklist.
+error EmptyBlacklistReason();
 
 /**
  * @title TCGVaultToken (TCGV)
  * @notice Token A — le Moteur économique (whitepaper §4). BNB Chain, 1 milliard supply.
  * @dev Initial allocation (whitepaper §5): 60% Presale, 20% Liquidité, 4% Team (12mo cliff + 24mo vesting), 16% Ops (5% immediate + 11% over 36mo vesting).
  * @dev Taxe achat 15% (10% Vault, 3% Marketing, 2% burn). Cashback NEXUS: 30% pendant les Vagues 1 et 2 (prévente), 10% en période standard (whitepaper §6).
- * @dev Taxe vente 10%.
+ * @dev Taxe vente 10%. Protocol admin is {AccessControl}-DEFAULT_ADMIN_ROLE (granted to deployer).
  */
-contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
+contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
+    /// @notice Hard cap for configurable buy/sell tax rates (25%).
+    uint256 public constant MAX_FEE_BP = 2500;
     // Fee parameters (basis points, 10000 = 100%) — whitepaper defaults; owner-modifiable for pool/router modes
     uint256 public BUY_TAX = 1500; // 15%
     uint256 public SELL_TAX = 1000; // 10%
@@ -55,8 +54,6 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
     uint256 private constant CASHBACK_RATE_PRESALE = 3000; // 30%
     /// @notice Seconds per month for vesting (30 days).
     uint256 private constant SECONDS_PER_MONTH = 30 * 24 * 3600;
-    /// @dev Transient storage slot for liquidity wrapper: when set, add/remove liquidity transfers are exempt from fees (EIP-1153).
-    uint256 private constant FEE_EXEMPT_SLOT = 0;
     /// @notice When true, cashback uses 30%; when false (after presale finalize), uses 10%. Only set when presale finalizer calls finalizePresaleAndRecompute().
     bool public presaleActive = true;
 
@@ -72,20 +69,17 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
     uint256 public SELL_COMMUNITY_SHARE = 1000; // 1% of total = 10% of 10%
     uint256 public SELL_BURN_SHARE = 1000; // 1% of total = 10% of 10%
     
-    // Addresses
-    address public pancakeRouter;
-    address public pancakeFactory;
-    address public pancakePair;
+    /// @notice Registered Uniswap V2–style DEX routers for metadata / integrations; `factory == address(0)` means not registered.
+    mapping(address => address) public dexFactoryForRouter;
     address public vaultAddress;
     address public marketingAddress;
     address public communityAddress;
-    address public nexusToken; // TCG-NEXUS token for cashback (Soulbound)
+    /// @notice TCG-NEXUS for cashback (immutable; set once in constructor).
+    address private immutable _nexusToken;
     /// @notice When set, buys through this router charge fee in BNB (router path); only this address can call recordBuyAndMintCashback.
     address public buyRouter;
-    /// @notice Liquidity wrapper allowed to set transient fee-exempt slot (EIP-1153 is per-contract; only this contract's tstore is visible in _update).
-    address public liquidityWrapper;
-    /// @notice Only this address can call finalizePresaleAndRecompute() and mintPresale(). Set to launch contract (e.g. TCGVaultInitialLaunch).
-    address public presaleFinalizer;
+    /// @notice Only this address can call finalizePresaleAndRecompute() and mintPresale(). Set once in constructor.
+    address public immutable presaleFinalizer;
     /// @notice True after recomputeSupplyAndBurn has been called (one-time; mints 20% liquidity, 4% team vesting, 5% ops direct, 11% ops vesting).
     bool public supplyRecomputed;
     /// @notice Recipients for post-presale mint (whitepaper §5: 20% liquidity, 4% team vesting, 16% ops). Set by owner before presale end.
@@ -122,6 +116,10 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
     bool public paused;
 
     // Events
+    event FeesEnabledUpdated(bool enabled);
+    event CashbackEnabledUpdated(bool enabled);
+    event PresaleActiveUpdated(bool active);
+    event MinAmountsUpdated(uint256 minBuyAmount, uint256 minSellAmount);
     event FeesDistributed(
         uint256 vaultAmount,
         uint256 marketingAmount,
@@ -142,138 +140,191 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
     );
     event PresaleFinalized();
     event SupplyRecomputed(uint256 presaleSold, uint256 finalTotalSupply, uint256 mintedLiquidity, uint256 mintedTeamVesting, uint256 mintedOpsDirect, uint256 mintedOpsVesting);
-    event TeamVestingClaimed(address indexed recipient, uint256 amount);
-    event OpsVestingClaimed(address indexed recipient, uint256 amount);
+    event TeamVestingClaimed(address recipient, uint256 amount);
     event PendingAutolpExecuted(uint256 amount);
-    event BlacklistUpdated(address indexed account, bool status);
+    event OpsVestingClaimed(address recipient, uint256 amount);
+    event BlacklistUpdated(address account, bool status, bytes32 reasonHash, string reason);
+    event BlacklistTokensSeized(address account, address vault, uint256 amount);
     event Paused(address account);
     event Unpaused(address account);
+    event FeeRecipientsUpdated(address vault, address marketing, address community);
+    /// @notice A V2 pool was registered or removed for buy/sell fee routing (`isPair`).
+    event PairActiveUpdated(address pair, bool active);
+    /// @notice Fee exclusion flag for `account` (`isExcludedFromFees`). Emitted on admin setters and on deployment defaults.
+    event ExcludedFromFeesUpdated(address account, bool excluded);
+    /// @notice A DEX router was added (`active == true`, `factory` from `router.factory()`) or removed (`active == false`).
+    event DexRouterUpdated(address router, address factory, bool active);
+    /// @notice Post-presale mint recipients (liquidity / team vesting / ops).
+    event AllocationRecipientsUpdated(address liquidity, address team, address ops);
+    /// @notice BNB-path buy router (`recordBuyAndMintCashback` / `burn`); `address(0)` clears.
+    event BuyRouterUpdated(address buyRouter);
 
     /// @notice Whitepaper §4.1: TCG-VAULT Token, TCGV, 1 milliard supply, BNB Chain.
+    /// @param dexRouter_ Initial Uniswap V2–style router (read-only `factory()`, fee-excluded). Add more via `setDexRouter`; register pools with `setPair`.
     constructor(
-        address _pancakeRouter,
+        address dexRouter_,
         address _vaultAddress,
         address _marketingAddress,
         address _communityAddress,
-        address _nexusToken
-    ) ERC20("TCG-VAULT Token", "TCGV") Ownable(msg.sender) {
+        address nexusToken_,
+        address presaleFinalizer_
+    ) ERC20("TCG-VAULT Token", "TCGV") {
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         if (_vaultAddress == address(0) || _marketingAddress == address(0) || _communityAddress == address(0)) {
             revert ZeroAddress();
         }
-        pancakeRouter = _pancakeRouter;
-        pancakeFactory = IPancakeRouter(_pancakeRouter).factory();
+        if (nexusToken_ == address(0)) revert ZeroAddress();
+        if (dexRouter_ == address(0)) revert ZeroAddress();
+        if (presaleFinalizer_ == address(0)) revert ZeroAddress();
         vaultAddress = _vaultAddress;
         marketingAddress = _marketingAddress;
         communityAddress = _communityAddress;
-        nexusToken = _nexusToken;
+        _nexusToken = nexusToken_;
+        presaleFinalizer = presaleFinalizer_;
 
-        pancakePair = IPancakeFactory(pancakeFactory).getPair(address(this), IPancakeRouter(_pancakeRouter).WETH());
+        emit FeeRecipientsUpdated(_vaultAddress, _marketingAddress, _communityAddress);
 
-        isExcludedFromFees[msg.sender] = true;
+        // Exclude the token contract itself so internal accounting transfers (vesting, fee accounting, etc.)
+        // do not accidentally trigger buy/sell fee logic.
         isExcludedFromFees[address(this)] = true;
-        isExcludedFromFees[pancakeRouter] = true;
+        emit ExcludedFromFeesUpdated(address(this), true);
+
+        _setDexRouter(dexRouter_, true);
 
         minBuyAmount = 10_000;
         minSellAmount = 10_000;
+        emit MinAmountsUpdated(minBuyAmount, minSellAmount);
+
+        // Initial fee / flag state (matches storage defaults) so subgraph has a full snapshot at deploy.
+        emit FeesEnabledUpdated(feesEnabled);
+        emit CashbackEnabledUpdated(cashbackEnabled);
+        emit PresaleActiveUpdated(presaleActive);
+        emit BuyFeeParamsUpdated(BUY_TAX, BUY_VAULT_SHARE, BUY_MARKETING_SHARE, BUY_BURN_SHARE);
+        emit SellFeeParamsUpdated(
+            SELL_TAX,
+            SELL_VAULT_SHARE,
+            SELL_AUTOLP_SHARE,
+            SELL_MARKETING_SHARE,
+            SELL_COMMUNITY_SHARE,
+            SELL_BURN_SHARE
+        );
 
         // No initial mint. Supply is minted during presale (mintPresale by launch contract) and at presale end (finalizePresaleAndRecompute mints 20% liquidity, 4% team vesting, 5% ops direct, 11% ops vesting — whitepaper §5).
     }
 
-    /**
-     * @notice Set PancakeSwap pair address
-     * @dev Call this after liquidity is added to set the pair address
-     */
-    function setPair(address _pair) external onlyOwner {
-        if (_pair == address(0)) revert PairZeroAddress();
-        pancakePair = _pair;
-        isPair[_pair] = true;
-        // Do not exclude pair from fees: buys (pair -> user) and sells (user -> pair) must be taxed
+    /// @notice NEXUS token used for buy cashback (same address for the life of the contract).
+    function nexusToken() external view returns (address) {
+        return _nexusToken;
     }
 
     /**
-     * @notice Add or remove pair address
+     * @notice Register (`active == true`) or remove (`active == false`) a Uniswap V2–style router: stores `factory` from `router.factory()`, fee-excludes the router.
      */
-    function setPairStatus(address _pair, bool _status) external onlyOwner {
-        isPair[_pair] = _status;
+    function setDexRouter(address router, bool active) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _setDexRouter(router, active);
     }
 
-    /**
-     * @notice Set the liquidity wrapper that may call setTransientFeeExempt (for add/remove liquidity without fees).
-     */
-    function setLiquidityWrapper(address _wrapper) external onlyOwner {
-        liquidityWrapper = _wrapper;
-    }
-
-    /**
-     * @notice Set transient fee-exempt flag (EIP-1153). Only callable by liquidityWrapper. Wrapper must call with true before add/remove liquidity and false after, so _update sees the flag in the same tx.
-     * @dev Transient storage is per-contract: only this contract's tstore is visible in this contract's tload. The wrapper cannot set our slot from its contract; it must call this.
-     */
-    function setTransientFeeExempt(bool exempt) external {
-        if (msg.sender != liquidityWrapper) revert OnlyLiquidityWrapper();
-        assembly {
-            tstore(FEE_EXEMPT_SLOT, exempt)
+    function _setDexRouter(address router, bool active) private {
+        if (router == address(0)) revert ZeroAddress();
+        if (active) {
+            address factory_ = IPancakeRouter(router).factory();
+            if (factory_ == address(0)) revert ZeroAddress();
+            dexFactoryForRouter[router] = factory_;
+            isExcludedFromFees[router] = true;
+            emit DexRouterUpdated(router, factory_, true);
+            emit ExcludedFromFeesUpdated(router, true);
+        } else {
+            dexFactoryForRouter[router] = address(0);
+            isExcludedFromFees[router] = false;
+            emit DexRouterUpdated(router, address(0), false);
+            emit ExcludedFromFeesUpdated(router, false);
         }
     }
 
     /**
-     * @notice Set addresses for fee distribution
+     * @notice Register (`active == true`) or disable (`active == false`) a V2 pool for taxed buys/sells.
+     * @dev Fee logic uses only `isPair`. Call after the pool exists. Use one address per pool (e.g. TCGV/USDC).
+     */
+    function setPair(address pair, bool active) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (pair == address(0)) revert PairZeroAddress();
+        isPair[pair] = active;
+        emit PairActiveUpdated(pair, active);
+    }
+
+    /**
+     * @notice Update vault, marketing, and community fee recipients (NEXUS stays fixed from constructor).
      */
     function setAddresses(
         address _vaultAddress,
         address _marketingAddress,
-        address _communityAddress,
-        address _nexusToken
-    ) external onlyOwner {
+        address _communityAddress
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (_vaultAddress == address(0) || _marketingAddress == address(0) || _communityAddress == address(0)) {
             revert ZeroAddress();
         }
         vaultAddress = _vaultAddress;
         marketingAddress = _marketingAddress;
         communityAddress = _communityAddress;
-        nexusToken = _nexusToken;
+        emit FeeRecipientsUpdated(_vaultAddress, _marketingAddress, _communityAddress);
     }
 
     /**
      * @notice Exclude or include address from fees
      */
-    function setExcludedFromFees(address account, bool excluded) external onlyOwner {
+    function setExcludedFromFees(address account, bool excluded) external onlyRole(DEFAULT_ADMIN_ROLE) {
         isExcludedFromFees[account] = excluded;
+        emit ExcludedFromFeesUpdated(account, excluded);
     }
 
     /**
      * @notice Enable or disable fees
      */
-    function setFeesEnabled(bool _enabled) external onlyOwner {
+    function setFeesEnabled(bool _enabled) external onlyRole(DEFAULT_ADMIN_ROLE) {
         feesEnabled = _enabled;
+        emit FeesEnabledUpdated(_enabled);
     }
 
     /**
      * @notice Enable or disable cashback
      */
-    function setCashbackEnabled(bool _enabled) external onlyOwner {
+    function setCashbackEnabled(bool _enabled) external onlyRole(DEFAULT_ADMIN_ROLE) {
         cashbackEnabled = _enabled;
+        emit CashbackEnabledUpdated(_enabled);
     }
 
     /**
      * @notice Set minimum amounts for buy/sell so fee computation is meaningful.
      */
-    function setMinAmounts(uint256 _minBuyAmount, uint256 _minSellAmount) external onlyOwner {
+    function setMinAmounts(uint256 _minBuyAmount, uint256 _minSellAmount) external onlyRole(DEFAULT_ADMIN_ROLE) {
         minBuyAmount = _minBuyAmount;
         minSellAmount = _minSellAmount;
+        emit MinAmountsUpdated(_minBuyAmount, _minSellAmount);
     }
 
     /**
-     * @notice Blacklist an address (fraud, market manipulation, Sybil). Blacklisted addresses cannot send nor receive TCGV.
+     * @notice Blacklist an address (fraud, market manipulation, Sybil). When enabling, confiscates entire TCGV balance to `vaultAddress` first; blacklisted addresses cannot send nor receive after.
      */
-    function setBlacklisted(address account, bool status) external onlyOwner {
+    function setBlacklisted(address account, bool status, string calldata reason) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (account == address(0)) revert ZeroAddress();
+        bytes memory reasonBytes = bytes(reason);
+        if (status && reasonBytes.length == 0) revert EmptyBlacklistReason();
+        bytes32 reasonHash = reasonBytes.length == 0 ? bytes32(0) : keccak256(reasonBytes);
+        if (status) {
+            uint256 bal = balanceOf(account);
+            if (bal > 0 && account != vaultAddress) {
+                // Direct balance move: bypass fees, blacklist, and pause checks in this contract's _update.
+                super._update(account, vaultAddress, bal);
+                emit BlacklistTokensSeized(account, vaultAddress, bal);
+            }
+        }
         isBlacklisted[account] = status;
-        emit BlacklistUpdated(account, status);
+        emit BlacklistUpdated(account, status, reasonHash, reason);
     }
 
     /**
      * @notice Pause all transfers (emergency security). When paused, buy/sell/transfer/mintPresale (via _update) are blocked.
      */
-    function pause() external onlyOwner {
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         paused = true;
         emit Paused(msg.sender);
     }
@@ -281,16 +332,9 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
     /**
      * @notice Unpause the contract.
      */
-    function unpause() external onlyOwner {
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         paused = false;
         emit Unpaused(msg.sender);
-    }
-
-    /**
-     * @notice Set presale active flag (e.g. emergency cancel presale). When set to false, finalizePresaleAndRecompute will revert PresaleNotFinalized until presale is finalized normally.
-     */
-    function setPresaleActive(bool _active) external onlyOwner {
-        presaleActive = _active;
     }
 
     /**
@@ -302,8 +346,8 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
         uint256 vaultShareBp,
         uint256 marketingShareBp,
         uint256 burnShareBp
-    ) external onlyOwner {
-        if (buyTaxBp > 10000) revert InvalidFeeParams();
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (buyTaxBp > MAX_FEE_BP) revert InvalidFeeParams();
         if (vaultShareBp + marketingShareBp + burnShareBp != 10000) revert InvalidFeeParams();
         BUY_TAX = buyTaxBp;
         BUY_VAULT_SHARE = vaultShareBp;
@@ -323,8 +367,8 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
         uint256 marketingShareBp,
         uint256 communityShareBp,
         uint256 burnShareBp
-    ) external onlyOwner {
-        if (sellTaxBp > 10000) revert InvalidFeeParams();
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (sellTaxBp > MAX_FEE_BP) revert InvalidFeeParams();
         if (vaultShareBp + autolpShareBp + marketingShareBp + communityShareBp + burnShareBp != 10000) {
             revert InvalidFeeParams();
         }
@@ -345,20 +389,13 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Set the presale finalizer (e.g. TCGVaultInitialLaunch) once. Only this address can call finalizePresaleAndRecompute() and mintPresale(). Cannot be changed after first set.
-     */
-    function setPresaleFinalizer(address _presaleFinalizer) external onlyOwner {
-        if (presaleFinalizer != address(0)) revert PresaleFinalizerAlreadySet();
-        presaleFinalizer = _presaleFinalizer;
-    }
-
-    /**
      * @notice Set recipients for post-presale mint (whitepaper §5: 20% liquidity, 4% team vesting, 16% ops). Must be set before finalizePresaleAndRecompute().
      */
-    function setAllocationRecipients(address _liquidity, address _team, address _ops) external onlyOwner {
+    function setAllocationRecipients(address _liquidity, address _team, address _ops) external onlyRole(DEFAULT_ADMIN_ROLE) {
         liquidityRecipient = _liquidity;
         teamRecipient = _team;
         opsRecipient = _ops;
+        emit AllocationRecipientsUpdated(_liquidity, _team, _ops);
     }
 
     /**
@@ -384,6 +421,7 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
 
         // Finalize presale: switch cashback 30% -> 10%
         presaleActive = false;
+        emit PresaleActiveUpdated(false);
         emit PresaleFinalized();
 
         uint256 presaleSold = ITCGVaultInitialLaunch(presaleFinalizer).totalTCGVAllocated();
@@ -491,10 +529,17 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
     /**
      * @notice Set the buy router (fee in BNB path). Only this contract can call recordBuyAndMintCashback.
      */
-    function setBuyRouter(address _buyRouter) external onlyOwner {
+    function setBuyRouter(address _buyRouter) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        address previous = buyRouter;
+        if (previous != address(0) && previous != _buyRouter) {
+            isExcludedFromFees[previous] = false;
+            emit ExcludedFromFeesUpdated(previous, false);
+        }
         buyRouter = _buyRouter;
+        emit BuyRouterUpdated(_buyRouter);
         if (_buyRouter != address(0)) {
             isExcludedFromFees[_buyRouter] = true;
+            emit ExcludedFromFeesUpdated(_buyRouter, true);
         }
     }
 
@@ -503,10 +548,10 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
      */
     function recordBuyAndMintCashback(address recipient, uint256 tcgvAmount) external {
         if (msg.sender != buyRouter) revert OnlyBuyRouter();
-        if (nexusToken == address(0) || !cashbackEnabled) return;
+        if (!cashbackEnabled) return;
         uint256 cashbackAmount = (tcgvAmount * getCashbackRate()) / 10000;
         if (cashbackAmount == 0) return;
-        ITCGNexusToken(nexusToken).mintCashback(recipient, cashbackAmount);
+        ITCGNexusToken(_nexusToken).mintCashback(recipient, cashbackAmount);
         emit CashbackDistributed(recipient, cashbackAmount);
     }
 
@@ -522,7 +567,7 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
 
     /**
      * @notice Override transfer to apply fees
-     * @dev Detects buys (from pair) and sells (to pair). Skips fees when FEE_EXEMPT_SLOT is set (liquidity add/remove via wrapper).
+     * @dev Detects buys (from pair) and sells (to pair). Liquidity helpers should be `isExcludedFromFees` and receive withdrawals before forwarding to users.
      */
     function _update(address from, address to, uint256 amount) internal override {
         if (amount == 0) {
@@ -531,16 +576,6 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
         }
         if (paused) revert ContractPaused();
         if (isBlacklisted[from] || isBlacklisted[to]) revert Blacklisted();
-
-        // Skip fees when liquidity wrapper set transient storage (add/remove liquidity)
-        uint256 exempt;
-        assembly {
-            exempt := tload(FEE_EXEMPT_SLOT)
-        }
-        if (exempt != 0) {
-            super._update(from, to, amount);
-            return;
-        }
 
         // Skip fees for excluded addresses
         if (isExcludedFromFees[from] || isExcludedFromFees[to] || !feesEnabled) {
@@ -626,12 +661,11 @@ contract TCGVaultToken is ERC20, Ownable, ReentrancyGuard {
      * @notice Distribute cashback in TCGNexus tokens (30% presale, 10% standard). Reverts if mint fails.
      */
     function _distributeCashback(address recipient, uint256 purchaseAmount) private {
-        if (nexusToken == address(0)) return;
         if (!cashbackEnabled) return;
         uint256 cashbackAmount = (purchaseAmount * getCashbackRate()) / 10000;
         if (cashbackAmount == 0) return;
 
-        ITCGNexusToken(nexusToken).mintCashback(recipient, cashbackAmount);
+        ITCGNexusToken(_nexusToken).mintCashback(recipient, cashbackAmount);
         emit CashbackDistributed(recipient, cashbackAmount);
     }
 

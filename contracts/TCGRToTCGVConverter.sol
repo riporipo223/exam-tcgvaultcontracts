@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.27;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "./interfaces/ITCGRToken.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ITCGRToken} from "./interfaces/ITCGRToken.sol";
 
 /**
  * @title TCGRToTCGVConverter
@@ -19,7 +19,7 @@ contract TCGRToTCGVConverter is Ownable {
     uint256 private _ratio; // 1e18 TCGR -> ratio TCGV (18 decimals)
 
     event RatioUpdated(uint256 oldRatio, uint256 newRatio);
-    event Converted(address indexed user, uint256 tcgrBurned, uint256 tcgvOut);
+    event Converted(address user, uint256 tcgrBurned, uint256 tcgvOut);
 
     error ZeroAmount();
     error InsufficientTcgvReserve();
@@ -30,6 +30,7 @@ contract TCGRToTCGVConverter is Ownable {
         _tcgv = IERC20(tcgv_);
         if (ratio_ == 0) revert ZeroRatio();
         _ratio = ratio_;
+        emit RatioUpdated(0, ratio_);
     }
 
     function tcgr() external view returns (address) {

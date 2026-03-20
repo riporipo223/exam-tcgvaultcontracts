@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.27;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
-import "@openzeppelin/contracts/utils/Nonces.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
+import {ERC20Votes} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
+import {Nonces} from "@openzeppelin/contracts/utils/Nonces.sol";
 
 /**
  * @title TCGNexusToken (TCG-NEXUS)
@@ -40,9 +40,10 @@ contract TCGNexusToken is ERC20Permit, ERC20Votes, Ownable {
         return _allowedPresaleMinters[account];
     }
 
-    event CashbackMinted(address indexed recipient, uint256 amount);
-    event PresaleBonusMinted(address indexed recipient, uint256 amount);
-
+    event CashbackMinted(address recipient, uint256 amount);
+    event PresaleBonusMinted(address recipient, uint256 amount);
+    event PresaleMinterUpdated(address account, bool allowed);
+    event OwnerMinted(address to, uint256 amount);
     constructor(address minter_) ERC20("TCG-NEXUS", "NEXUS") ERC20Permit("TCG-NEXUS") Ownable(msg.sender) {
         if (minter_ == address(0)) revert ZeroAddress();
         _minter = minter_;
@@ -50,6 +51,7 @@ contract TCGNexusToken is ERC20Permit, ERC20Votes, Ownable {
 
     function setPresaleMinter(address account, bool allowed) external onlyOwner {
         _allowedPresaleMinters[account] = allowed;
+        emit PresaleMinterUpdated(account, allowed);
     }
 
     /// @dev Resolve nonces() conflict between ERC20Permit and Votes (both use Nonces).
@@ -96,5 +98,6 @@ contract TCGNexusToken is ERC20Permit, ERC20Votes, Ownable {
     function mint(address to, uint256 amount) external onlyOwner {
         if (to == address(0)) revert ZeroAddress();
         _mint(to, amount);
+        emit OwnerMinted(to, amount);
     }
 }

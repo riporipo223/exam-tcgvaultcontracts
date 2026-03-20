@@ -18,15 +18,14 @@
  *
  * Flow:
  *   1. Deploy: TCGVaultToken, TCGNexusToken, TCGVaultFounderNFT, TCGVaultInitialLaunch, BuyRouter, Wrapper, TCGR, Converter (USDC = real BSC USDC).
- *   2. Fund all accounts with real USDC via storage cheatcode; wire presale finalizer and Nexus minters.
+ *   2. Fund all accounts with real USDC via storage cheatcode; wire Nexus presale minters (token presaleFinalizer is immutable = InitialLaunch).
  *   3. Trader buys TCGV (wave 1).
  *   4. Mint 250 Founder NFTs (245 trader + 5 owner) so wave 2 starts; exhaust to 500; wave-2 buys; large-scale multiple buyers.
  *   5. Time travel 121h, finalize; assert buy() reverts (PresaleEnded).
  *   6. Trader claims 10% TGE; vesting over 9 months.
- *   7. Optional: DEX liquidity, swap, BuyRouter referral, TCGR→TCGV convert.
+ *   7. Optional: TCGV/USDC DEX liquidity, USDC→TCGV swap, BuyRouter referral, TCGR→TCGV convert.
  */
 
-import { NetworkHelpers } from "@nomicfoundation/hardhat-network-helpers/types";
 import hre from "hardhat";
 import {
   parseEther,
@@ -221,20 +220,18 @@ async function main() {
   const wave2Buyer = wallets[2] ?? wallets[1]!;
   const whale = wallets[3] ?? wallets[1]!;
 
-  // Fund trader EOA (custom private key) with BNB from the rich Anvil account
-  // so it can pay gas for NFT mints and presale buys.
-  await deployer.sendTransaction({
-    to: trader.account.address,
-    value: parseEther("10"),
-  });
-  await deployer.sendTransaction({
-    to: wave2Buyer.account.address,
-    value: parseEther("5"),
-  });
-  await deployer.sendTransaction({
-    to: whale.account.address,
-    value: parseEther("5"),
-  });
+  // Top up native balance for gas on Anvil/Hardhat fork (no DEX path; TCGV/USDC only for trading).
+  try {
+    const richBalanceHex = "0x3635C9ADC5DEA0000000";
+    const provider = (hre as { network?: { provider?: { request?: (a: { method: string; params: unknown[] }) => Promise<unknown> } } }).network?.provider;
+    if (provider?.request) {
+      for (const w of [deployer, trader, wave2Buyer, whale]) {
+        await provider.request({ method: "anvil_setBalance", params: [w.account.address, richBalanceHex] });
+      }
+    }
+  } catch {
+    // Pre-funded default accounts on Hardhat, or live network — no cheatcode.
+  }
 
   const vaultReceiver = await viem.deployContract("FeeReceiver", [], { client: { wallet: deployer } });
   const marketingReceiver = await viem.deployContract("FeeReceiver", [], { client: { wallet: deployer } });
@@ -258,51 +255,59 @@ async function main() {
   console.log("Trader:  ", trader.account.address);
   console.log();
 
-  let nonce = await publicClient.getTransactionCount({ address: deployer.account.address });
+  let nonce = BigInt(
+    await publicClient.getTransactionCount({ address: deployer.account.address, blockTag: "pending" })
+  );
 
   // --- Phase 1: Deploy core contracts (use real BSC USDC) ---
+  // TCGVaultToken.presaleFinalizer is immutable → predict InitialLaunch address (nonce+3) before deploying token (nonce+1).
   console.log("--- Phase 1: Deploy core contracts (USDC = real BSC USDC) ---");
+
+  const nexusTokenAddress = getContractAddress({ from: deployer.account.address, nonce }) as Address;
+  const tokenAddress = getContractAddress({ from: deployer.account.address, nonce: nonce + 1n }) as Address;
+  const founderNFTAddress = getContractAddress({ from: deployer.account.address, nonce: nonce + 2n }) as Address;
+  const initialLaunchAddress = getContractAddress({ from: deployer.account.address, nonce: nonce + 3n }) as Address;
+
+  await viem.deployContract("contracts/TCGNexusToken.sol:TCGNexusToken", [tokenAddress], { client: { wallet: deployer } });
+  nonce += 1n;
 
   await viem.deployContract("TCGVaultToken", [
     PANCAKE_ROUTER,
     vaultAddr,
     marketingAddr,
     communityAddr,
-    zeroAddress,
-  ], { client: { wallet: deployer } });
-  const tokenAddress = getContractAddress({ from: deployer.account.address, nonce: BigInt(nonce++) }) as Address;
-  const token = await viem.getContractAt("TCGVaultToken", tokenAddress);
-  console.log("TCGVaultToken:", tokenAddress);
-
-  await viem.deployContract("contracts/TCGNexusToken.sol:TCGNexusToken", [tokenAddress], { client: { wallet: deployer } });
-  const nexusTokenAddress = getContractAddress({ from: deployer.account.address, nonce: BigInt(nonce++) }) as Address;
-  const nexusToken = await viem.getContractAt("TCGNexusToken", nexusTokenAddress);
-  console.log("TCGNexusToken:", nexusTokenAddress);
-
-  await token.write.setAddresses([vaultAddr, marketingAddr, communityAddr, nexusTokenAddress], { account: deployer.account });
-
-  const founderNFT = await viem.deployContract("TCGVaultFounderNFT", [
-    BSC_USDC,
     nexusTokenAddress,
-    vaultAddr,
+    initialLaunchAddress,
   ], { client: { wallet: deployer } });
-  const founderNFTAddress = founderNFT.address as Address;
-  console.log("TCGVaultFounderNFT:", founderNFTAddress);
+  nonce += 1n;
 
-  const initialLaunch = await viem.deployContract("TCGVaultInitialLaunch", [
+  await viem.deployContract("TCGVaultFounderNFT", [BSC_USDC, nexusTokenAddress, vaultAddr], {
+    client: { wallet: deployer },
+  });
+  nonce += 1n;
+
+  await viem.deployContract("TCGVaultInitialLaunch", [
     tokenAddress,
     BSC_USDC,
     founderNFTAddress,
     nexusTokenAddress,
     vaultAddr,
   ], { client: { wallet: deployer } });
-  const initialLaunchAddress = initialLaunch.address as Address;
+  nonce += 1n;
+
+  const nexusToken = await viem.getContractAt("TCGNexusToken", nexusTokenAddress);
+  const token = await viem.getContractAt("TCGVaultToken", tokenAddress);
+  const founderNFT = await viem.getContractAt("TCGVaultFounderNFT", founderNFTAddress);
+  const initialLaunch = await viem.getContractAt("TCGVaultInitialLaunch", initialLaunchAddress);
+
+  console.log("TCGNexusToken:", nexusTokenAddress);
+  console.log("TCGVaultToken:", tokenAddress);
+  console.log("TCGVaultFounderNFT:", founderNFTAddress);
   console.log("TCGVaultInitialLaunch:", initialLaunchAddress);
 
-  await token.write.setPresaleFinalizer([initialLaunchAddress], { account: deployer.account });
   await nexusToken.write.setPresaleMinter([founderNFTAddress, true], { account: deployer.account });
   await nexusToken.write.setPresaleMinter([initialLaunchAddress, true], { account: deployer.account });
-  console.log("Presale finalizer = InitialLaunch; Nexus presale minters set.");
+  console.log("Presale finalizer (immutable) = InitialLaunch; Nexus presale minters set.");
   console.log();
 
   // --- Phase 2: BuyRouter & Wrapper (for optional DEX later) ---
@@ -321,7 +326,6 @@ async function main() {
     [tokenAddress, PANCAKE_ROUTER],
     { client: { wallet: deployer } },
   );
-  await token.write.setLiquidityWrapper([wrapper.address as Address], { account: deployer.account });
   await token.write.setExcludedFromFees([wrapper.address as Address, true], { account: deployer.account });
 
   const tcgr = await viem.deployContract("TCGRToken", [buyRouter.address as Address], { client: { wallet: deployer } });
@@ -634,7 +638,7 @@ async function main() {
     await setBSCUSDCBalance(deployerAddr as Address, BSC_USDC, 10_000_000n * 10n ** BigInt(USDC_DECIMALS), setStorageAt, usdc);
     await setBSCUSDCBalance(traderAddr as Address, BSC_USDC, 1_000_000n * 10n ** BigInt(USDC_DECIMALS), setStorageAt, usdc);
     const deployerUsdcBal = (await usdc.read.balanceOf([deployer.account.address])) as bigint;
-    console.log("BSC USDC deployer balance (cheatcode):", formatEther(deployerUsdcBal));
+    console.log("BSC USDC deployer balance (cheatcode):", Number(deployerUsdcBal) / 1e6, "USDC");
 
     const pancakeFactory = await viem.getContractAt("PancakeFactory", PANCAKE_FACTORY);
     const pancakeRouter = await viem.getContractAt("PancakeRouter", PANCAKE_ROUTER);
@@ -643,7 +647,7 @@ async function main() {
       await pancakeFactory.write.createPair([tokenAddress, BSC_USDC], { account: deployer.account });
       pairAddress = (await pancakeFactory.read.getPair([tokenAddress, BSC_USDC])) as Address;
     }
-    await token.write.setPair([pairAddress], { account: deployer.account });
+    await token.write.setPair([pairAddress, true], { account: deployer.account });
     await token.write.setMinAmounts([1n, 1n], { account: deployer.account });
 
     const deployerTcgv = await token.read.balanceOf([deployer.account.address]);
@@ -657,7 +661,7 @@ async function main() {
         [PANCAKE_ROUTER, BSC_USDC, liqTcgv, liqUsdc, 0n, 0n, dexDeadline],
         { account: deployer.account },
       );
-      console.log(`Liquidity added: ${formatEther(liqTcgv)} TCGV + ${formatEther(liqUsdc)} USDC`);
+      console.log(`Liquidity added: ${formatEther(liqTcgv)} TCGV + ${Number(liqUsdc) / 1e6} USDC`);
     }
 
     const path = [BSC_USDC, tokenAddress];

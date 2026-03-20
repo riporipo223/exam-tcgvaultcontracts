@@ -1,86 +1,210 @@
 import hre from "hardhat";
-import { formatEther, zeroAddress, getContractAddress } from "viem";
+import { formatEther, getContractAddress, type Address } from "viem";
+import { execSync } from "node:child_process";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type VerifyJob = {
+  address: Address;
+  constructorArguments: readonly unknown[];
+  contract?: string;
+};
+
+async function verifyOne(
+  address: Address,
+  constructorArguments: readonly unknown[],
+  contract?: string,
+): Promise<void> {
+  try {
+    const network = process.env.HARDHAT_NETWORK ?? "bsc";
+    const args = constructorArguments.map((v) => String(v));
+    const cmd = [
+      "yarn hardhat verify etherscan",
+      `--network ${network}`,
+      ...(contract ? [`--contract "${contract}"`] : []),
+      address,
+      ...args,
+    ].join(" ");
+    execSync(cmd, { stdio: "pipe" });
+    console.log(`Verified on BscScan: ${address}`);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.toLowerCase().includes("already verified")) {
+      console.log(`Already verified: ${address}`);
+      return;
+    }
+    console.warn(`Verification failed for ${address}: ${msg}`);
+  }
+}
+
+async function runQueuedVerifications(jobs: VerifyJob[]): Promise<void> {
+  if (jobs.length === 0) return;
+  const waitSeconds = Number(process.env.VERIFY_WAIT_SECONDS ?? "30");
+  if (waitSeconds > 0) {
+    console.log(`\nWaiting ${waitSeconds}s before verification batch...`);
+    await sleep(waitSeconds * 1000);
+  }
+  console.log(`Starting verification for ${jobs.length} contracts...`);
+  for (const job of jobs) {
+    await verifyOne(job.address, job.constructorArguments, job.contract);
+  }
+}
 
 /**
  * Deployment script for TCG Vault Token contracts
  *
  * Initial allocation (whitepaper §5): 60% Presale, 20% Liquidité, 4% Vesting & Équipe,
  * 5% Opérationnel & Marketing (immédiat), 11% Opérationnel & Marketing (vesting).
- * Post-deploy: transfer 60% (600M TCGV) to InitialLaunch for presale; allocate 20% to LP, 4% to team vesting, 16% to ops/marketing.
+ * Post-deploy: wire presale (InitialLaunch or deploy script order) per whitepaper §5–§6.
  *
- * NEXUS cashback (whitepaper §6): 30% during presale (Vagues 1 et 2), 10% after. Set token.setPresaleFinalizer(launchContract); launch contract calls token.finalizePresale() when it finalizes (120h countdown or hard cap).
+ * NEXUS cashback (whitepaper §6): presale finalizer is immutable in `TCGVaultToken` constructor — pass the launch contract address that will call `finalizePresaleAndRecompute()`.
  *
  * Usage:
  *   yarn hardhat run scripts/deployTCGVault.ts --network <network>
  *
  * Environment variables needed:
- *   - PANCAKE_ROUTER: PancakeSwap router address
- *   - VAULT_ADDRESS: Vault address for fee collection
- *   - MARKETING_ADDRESS: Marketing address
- *   - COMMUNITY_ADDRESS: Community rewards address
- *   - STABLECOIN_ADDRESS: Stablecoin address (USDT/USDC)
+ *   - PANCAKE_ROUTER: PancakeSwap router address (required)
+ *   - VAULT_ADDRESS: Vault address for fee collection (required)
+ *   - MARKETING_ADDRESS: Marketing address (required)
+ *   - COMMUNITY_ADDRESS: Community rewards address (required)
+ *   - STABLECOIN_ADDRESS: Stablecoin address (USDT/USDC). If omitted, deploy MockUSDC.
+ *   - PRESALE_FINALIZER: Address allowed to call mintPresale / finalize (e.g. TCGVaultInitialLaunch) (required)
+ *   - MOCK_USDC_MINT_DEPLOYER=0: if deploying MockUSDC, skip minting 1M USDC to deployer
  */
 
 async function main() {
   const { viem } = await hre.network.connect();
   const [deployer] = await viem.getWalletClients();
   const publicClient = await viem.getPublicClient();
+  const verifyJobs: VerifyJob[] = [];
 
   console.log("Deploying contracts with account:", deployer.account.address);
   console.log("Account balance:", formatEther(await publicClient.getBalance({ address: deployer.account.address })));
 
-  // Get addresses from environment or use defaults
-  const pancakeRouter = (process.env.PANCAKE_ROUTER || "0x10ED43C718714eb63d5aA57B78B54704E256024E") as `0x${string}`; // BSC Mainnet
-  const vaultAddress = (process.env.VAULT_ADDRESS || deployer.account.address) as `0x${string}`; // Replace with actual vault
-  const marketingAddress = (process.env.MARKETING_ADDRESS || deployer.account.address) as `0x${string}`; // Replace with actual marketing
-  const communityAddress = (process.env.COMMUNITY_ADDRESS || deployer.account.address) as `0x${string}`; // Replace with actual community
+  // Required address env vars: no fallback to avoid deploying with wrong recipients.
+  const pancakeRouter = process.env.PANCAKE_ROUTER?.trim() as `0x${string}` | undefined;
+  if (!pancakeRouter) {
+    console.error("Missing PANCAKE_ROUTER env var. Refusing to deploy.");
+    return;
+  }
+  const vaultAddress = process.env.VAULT_ADDRESS?.trim() as `0x${string}` | undefined;
+  if (!vaultAddress) {
+    console.error("Missing VAULT_ADDRESS env var. Refusing to deploy.");
+    return;
+  }
+  const marketingAddress = process.env.MARKETING_ADDRESS?.trim() as `0x${string}` | undefined;
+  if (!marketingAddress) {
+    console.error("Missing MARKETING_ADDRESS env var. Refusing to deploy.");
+    return;
+  }
+  const communityAddress = process.env.COMMUNITY_ADDRESS?.trim() as `0x${string}` | undefined;
+  if (!communityAddress) {
+    console.error("Missing COMMUNITY_ADDRESS env var. Refusing to deploy.");
+    return;
+  }
+  let stablecoinAddress = process.env.STABLECOIN_ADDRESS as Address | undefined;
+  const presaleFinalizer = process.env.PRESALE_FINALIZER?.trim() as `0x${string}` | undefined;
+  if (!presaleFinalizer) {
+    console.error("Missing PRESALE_FINALIZER env var. Refusing to deploy.");
+    return;
+  }
+  if (!stablecoinAddress) {
+    console.log("\n0. Deploying MockUSDC (no STABLECOIN_ADDRESS provided)...");
+    const mockUsdc = await viem.deployContract("contracts/test/MockUSDC.sol:MockUSDC", [], {
+      client: { wallet: deployer },
+    });
+    stablecoinAddress = mockUsdc.address as Address;
+    console.log("MockUSDC deployed to:", stablecoinAddress);
+    if (process.env.MOCK_USDC_MINT_DEPLOYER !== "0") {
+      const usdc = await viem.getContractAt("contracts/test/MockUSDC.sol:MockUSDC", stablecoinAddress);
+      const mintAmount = 1_000_000n * 1_000_000n; // 1M USDC (6 decimals)
+      const mintHash = await usdc.write.mint([deployer.account.address, mintAmount], { account: deployer.account });
+      await publicClient.waitForTransactionReceipt({ hash: mintHash });
+      console.log("Minted 1,000,000 MockUSDC to deployer.");
+    }
+    verifyJobs.push({
+      address: stablecoinAddress,
+      constructorArguments: [],
+      contract: "contracts/test/MockUSDC.sol:MockUSDC",
+    });
+  } else {
+    console.log("Using STABLECOIN_ADDRESS:", stablecoinAddress);
+  }
 
-  // Deploy TCGVaultToken first (nexusToken set to zero until Nexus is deployed)
-  console.log("\n1. Deploying TCGVaultToken...");
-  let nonce = await publicClient.getTransactionCount({ address: deployer.account.address });
+  // Deploy TCGNexusToken first (minter = predicted TCGV), then TCGVaultToken with immutable NEXUS + presale finalizer
+  let nonce = BigInt(
+    await publicClient.getTransactionCount({ address: deployer.account.address, blockTag: "pending" })
+  );
+  const futureTcgvAddress = getContractAddress({ from: deployer.account.address, nonce: nonce + 1n });
+  const nexusTokenAddress = getContractAddress({ from: deployer.account.address, nonce });
+
+  console.log("\n1. Deploying TCGNexus Token (minter = predicted TCGV)...");
+  await viem.deployContract("TCGNexusToken", [futureTcgvAddress], { client: { wallet: deployer } });
+  nonce += 1n;
+  console.log("TCGNexus Token deployed to:", nexusTokenAddress);
+  verifyJobs.push({
+    address: nexusTokenAddress,
+    constructorArguments: [futureTcgvAddress],
+    contract: "contracts/TCGNexusToken.sol:TCGNexusToken",
+  });
+
+  console.log("\n2. Deploying TCGVaultToken (NEXUS immutable from constructor)...");
   await viem.deployContract("TCGVaultToken", [
     pancakeRouter,
     vaultAddress,
     marketingAddress,
     communityAddress,
-    zeroAddress, // nexusToken set later via setAddresses
+    nexusTokenAddress,
+    presaleFinalizer,
   ], { client: { wallet: deployer } });
-  const tokenAddress = getContractAddress({ from: deployer.account.address, nonce: BigInt(nonce++) });
+  const tokenAddress = getContractAddress({ from: deployer.account.address, nonce });
+  nonce += 1n;
   const token = await viem.getContractAt("TCGVaultToken", tokenAddress);
   console.log("TCGVaultToken deployed to:", tokenAddress);
-
-  // Deploy TCGNexusToken with minter = TCGVaultToken (immutable, no setMinter)
-  console.log("\n2. Deploying TCGNexus Token...");
-  await viem.deployContract("TCGNexusToken", [tokenAddress], { client: { wallet: deployer } });
-  const nexusTokenAddress = getContractAddress({ from: deployer.account.address, nonce: BigInt(nonce++) });
-  console.log("TCGNexus Token deployed to:", nexusTokenAddress);
-
-  // Point TCGVaultToken to Nexus for cashback
-  console.log("\n3. Setting Nexus token on TCGVaultToken...");
-  const setAddrHash = await token.write.setAddresses([
-    vaultAddress,
-    marketingAddress,
-    communityAddress,
-    nexusTokenAddress,
-  ], { account: deployer.account });
-  await publicClient.waitForTransactionReceipt({ hash: setAddrHash });
-  console.log("Nexus token set successfully");
+  verifyJobs.push({
+    address: tokenAddress,
+    constructorArguments: [
+      pancakeRouter,
+      vaultAddress,
+      marketingAddress,
+      communityAddress,
+      nexusTokenAddress,
+      presaleFinalizer,
+    ],
+    contract: "contracts/TCGVaultToken.sol:TCGVaultToken",
+  });
 
   // Deploy TCGVaultBuyRouter
-  console.log("\n4. Deploying TCGVaultBuyRouter...");
+  console.log("\n3. Deploying TCGVaultBuyRouter...");
   await viem.deployContract("TCGVaultBuyRouter", [
     pancakeRouter,
+    stablecoinAddress,
     tokenAddress,
     vaultAddress,
     marketingAddress,
-    communityAddress
+    communityAddress,
   ], { client: { wallet: deployer } });
-  const buyRouterAddress = getContractAddress({ from: deployer.account.address, nonce: BigInt(nonce++) });
+  const buyRouterAddress = getContractAddress({ from: deployer.account.address, nonce });
+  nonce += 1n;
   const buyRouter = await viem.getContractAt("TCGVaultBuyRouter", buyRouterAddress);
   console.log("TCGVaultBuyRouter deployed to:", buyRouterAddress);
+  verifyJobs.push({
+    address: buyRouterAddress,
+    constructorArguments: [
+      pancakeRouter,
+      stablecoinAddress,
+      tokenAddress,
+      vaultAddress,
+      marketingAddress,
+      communityAddress,
+    ],
+    contract: "contracts/TCGVaultBuyRouter.sol:TCGVaultBuyRouter",
+  });
 
   // Set buy router on token
-  console.log("\n5. Setting buy router on TCGVaultToken...");
+  console.log("\n4. Setting buy router on TCGVaultToken...");
   const setRouterHash = await token.write.setBuyRouter([buyRouterAddress], { account: deployer.account });
   await publicClient.waitForTransactionReceipt({ hash: setRouterHash });
   console.log("Buy router set successfully");
@@ -90,13 +214,15 @@ async function main() {
   console.log("TCGNexus Token:", nexusTokenAddress);
   console.log("TCGVaultBuyRouter:", buyRouterAddress);
   console.log("PancakeSwap Router:", pancakeRouter);
+  console.log("Stablecoin:", stablecoinAddress);
   console.log("Vault Address:", vaultAddress);
   console.log("Marketing Address:", marketingAddress);
   console.log("Community Address:", communityAddress);
+  await runQueuedVerifications(verifyJobs);
 
   console.log("\n=== Next Steps ===");
   console.log("1. Add liquidity to PancakeSwap");
-  console.log("2. Call token.setPair(pairAddress) to register the pair");
+  console.log("2. Call token.setPair(pairAddress, true) to register the pair");
   console.log("3. Verify all addresses are correct");
   console.log("4. Test buy/sell transactions");
 }

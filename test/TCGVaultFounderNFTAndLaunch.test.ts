@@ -144,6 +144,34 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       );
     });
 
+    it("constructor reverts when nexus is zero", async () => {
+      await expectRevert(
+        viem.deployContract("TCGVaultFounderNFT", [
+          usdc.address,
+          "0x0000000000000000000000000000000000000000",
+          owner.account.address,
+        ], { client: { wallet: owner } })
+      );
+    });
+
+    it("constructor reverts when treasury is zero", async () => {
+      await expectRevert(
+        viem.deployContract("TCGVaultFounderNFT", [
+          usdc.address,
+          nexus.address,
+          "0x0000000000000000000000000000000000000000",
+        ], { client: { wallet: owner } })
+      );
+    });
+
+    it("setTreasury reverts when treasury is zero", async () => {
+      await viem.assertions.revertWithCustomError(
+        founderNFT.write.setTreasury(["0x0000000000000000000000000000000000000000"], { account: owner.account }),
+        founderNFT,
+        "ZeroAddress"
+      );
+    });
+
     it("setBaseURI reverts when not owner", async () => {
       await expectRevert(
         founderNFT.write.setBaseURI(["https://bad/"], { account: user1.account })

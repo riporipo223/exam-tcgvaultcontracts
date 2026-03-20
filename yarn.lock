@@ -2108,6 +2108,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"dotenv@npm:^17.3.1":
+  version: 17.3.1
+  resolution: "dotenv@npm:17.3.1"
+  checksum: 10c0/c78e0c2d5a549c751e544cc60e2b95e7cb67e0c551f42e094d161c6b297aa44b630a3c2dcacf5569e529a6c2a6b84e2ab9be8d37b299d425df5a18b81ce4a35f
+  languageName: node
+  linkType: hard
+
 "elliptic@npm:6.6.1":
   version: 6.6.1
   resolution: "elliptic@npm:6.6.1"
@@ -3832,6 +3839,7 @@ __metadata:
     "@openzeppelin/contracts-upgradeable": "npm:^5.3.0"
     "@types/mocha": "npm:^10.0.10"
     "@types/node": "npm:^22.8.5"
+    dotenv: "npm:^17.3.1"
     forge-std: "foundry-rs/forge-std#v1.9.4"
     hardhat: "npm:^3.1.10"
     typescript: "npm:~5.8.0"

@@ -1,60 +1,50 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.27;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "./interfaces/IRouter.sol";
-
-/// @notice Token may set transient fee-exempt (EIP-1153 is per-contract; wrapper calls token so token's tstore is visible in token's _update).
-interface ITransientFeeExemptToken {
-    function setTransientFeeExempt(bool exempt) external;
-}
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IRouter} from "./interfaces/IRouter.sol";
 
 /// @notice Router not in the allowed list.
 error RouterNotAllowed();
 
 /**
  * @title TCGVaultLiquidityWrapper
- * @notice Add/remove liquidity for TCGV/USDC pool on multiple DEXes (e.g. PancakeSwap, Uniswap) without redeploying. Per-router config: fee-exempt (no TCGV fees on LP moves) or fees enforced.
- * @dev For each router, owner sets allowed and whether to set token transient fee-exempt. When fee-exempt, TCGV does not charge fees on add/remove liquidity (whitepaper). User supplies both TCGV and quote token (e.g. USDC).
+ * @notice Add/remove liquidity for TCGV/tokenB (e.g. USDC) on allowed V2 routers without redeploying.
+ * @dev The token **must** fee-exclude `address(this)` via `TCGVaultToken.setExcludedFromFees(wrapper, true)` so that
+ *      (1) add: TCGV moves wrapper→pair with `from` excluded, and (2) remove: pair→wrapper with `to` excluded.
+ *      Removing liquidity uses `to = address(this)` on the router, then this contract forwards tokens to the user
+ *      so the pair→EOA transfer (otherwise taxed as a “buy”) never happens on-chain.
  */
 contract TCGVaultLiquidityWrapper is Ownable {
-    /// @notice The TCGV token for which transient fee-exempt can be toggled.
-    address public immutable tcgvToken;
-    /// @notice Routers that can be used for add/remove liquidity.
-    mapping(address => bool) private _allowedRouters;
-    /// @notice When true, token.setTransientFeeExempt(true) is used around the router call (no fees). When false, fees apply.
-    mapping(address => bool) private _feeExemptForRouter;
+    event AllowedRouterUpdated(address router, bool allowed);
 
-    // External getters (private/external pattern)
+    /// @notice The TCGV token this wrapper pulls and forwards.
+    address public immutable tcgvToken;
+    /// @notice Routers that may be used for add/remove liquidity.
+    mapping(address => bool) private _allowedRouters;
+
     function allowedRouters(address router) external view returns (bool) {
         return _allowedRouters[router];
     }
 
-    function feeExemptForRouter(address router) external view returns (bool) {
-        return _feeExemptForRouter[router];
-    }
-
-    /// @param tcgvToken_ The TCGV token address (must match tokenA in add/remove liquidity).
-    /// @param initialRouter Optional. If non-zero, set as allowed and fee-exempt for backward compatibility.
+    /// @param tcgvToken_ The TCGV token address (tokenA in add/remove liquidity).
+    /// @param initialRouter If non-zero, registered as allowed.
     constructor(address tcgvToken_, address initialRouter) Ownable(msg.sender) {
         if (tcgvToken_ == address(0)) revert();
         tcgvToken = tcgvToken_;
         if (initialRouter != address(0)) {
             _allowedRouters[initialRouter] = true;
-            _feeExemptForRouter[initialRouter] = true;
+            emit AllowedRouterUpdated(initialRouter, true);
         }
     }
 
     function setAllowedRouter(address router, bool allowed) external onlyOwner {
         _allowedRouters[router] = allowed;
+        emit AllowedRouterUpdated(router, allowed);
     }
 
-    function setFeeExemptForRouter(address router, bool exempt) external onlyOwner {
-        _feeExemptForRouter[router] = exempt;
-    }
-
-    /// @notice Add liquidity to TCGV/tokenB pool (e.g. TCGV/USDC). Caller must approve this contract for both tokens.
+    /// @notice Add liquidity. Caller approves this contract for TCGV and tokenB. LP tokens go to caller.
     function addLiquidity(
         address router,
         address tokenB,
@@ -69,10 +59,6 @@ contract TCGVaultLiquidityWrapper is Ownable {
         IERC20(tokenB).transferFrom(msg.sender, address(this), amountBDesired);
         IERC20(tcgvToken).approve(router, amountADesired);
         IERC20(tokenB).approve(router, amountBDesired);
-        bool isFeeExempt = _feeExemptForRouter[router];
-        if (isFeeExempt) {
-            ITransientFeeExemptToken(tcgvToken).setTransientFeeExempt(true);
-        }
         (amountA, amountB, liquidity) = IRouter(router).addLiquidity(
             tcgvToken,
             tokenB,
@@ -83,9 +69,6 @@ contract TCGVaultLiquidityWrapper is Ownable {
             msg.sender,
             deadline
         );
-        if (isFeeExempt) {
-            ITransientFeeExemptToken(tcgvToken).setTransientFeeExempt(false);
-        }
         if (amountA < amountADesired) {
             IERC20(tcgvToken).transfer(msg.sender, amountADesired - amountA);
         }
@@ -94,7 +77,7 @@ contract TCGVaultLiquidityWrapper is Ownable {
         }
     }
 
-    /// @notice Remove liquidity from TCGV/tokenB pool. Caller must approve this contract for the LP token.
+    /// @notice Remove liquidity. Router sends withdrawn tokens to this contract; we forward to caller.
     function removeLiquidity(
         address router,
         address tokenB,
@@ -107,21 +90,26 @@ contract TCGVaultLiquidityWrapper is Ownable {
         if (!_allowedRouters[router]) revert RouterNotAllowed();
         IERC20(lpToken).transferFrom(msg.sender, address(this), liquidity);
         IERC20(lpToken).approve(router, liquidity);
-        bool isFeeExempt = _feeExemptForRouter[router];
-        if (isFeeExempt) {
-            ITransientFeeExemptToken(tcgvToken).setTransientFeeExempt(true);
-        }
-        (amountA, amountB) = IRouter(router).removeLiquidity(
+        uint256 tcgvBefore = IERC20(tcgvToken).balanceOf(address(this));
+        uint256 tokenBBefore = IERC20(tokenB).balanceOf(address(this));
+        IRouter(router).removeLiquidity(
             tcgvToken,
             tokenB,
             liquidity,
             amountAMin,
             amountBMin,
-            msg.sender,
+            address(this),
             deadline
         );
-        if (isFeeExempt) {
-            ITransientFeeExemptToken(tcgvToken).setTransientFeeExempt(false);
+        // Forward by balance delta (pair token0/token1 order may differ from TCGV/tokenB param order).
+        uint256 tcgvOut = IERC20(tcgvToken).balanceOf(address(this)) - tcgvBefore;
+        uint256 tokenBOut = IERC20(tokenB).balanceOf(address(this)) - tokenBBefore;
+        if (tcgvOut > 0) {
+            IERC20(tcgvToken).transfer(msg.sender, tcgvOut);
         }
+        if (tokenBOut > 0) {
+            IERC20(tokenB).transfer(msg.sender, tokenBOut);
+        }
+        return (tcgvOut, tokenBOut);
     }
 }

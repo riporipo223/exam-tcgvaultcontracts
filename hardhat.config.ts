@@ -3,6 +3,10 @@ import hardhatViem from "@nomicfoundation/hardhat-viem";
 import hardhatViemAssertions from "@nomicfoundation/hardhat-viem-assertions";
 import hardhatNodeTestRunner from "@nomicfoundation/hardhat-node-test-runner";
 import hardhatNetworkHelpers from "@nomicfoundation/hardhat-network-helpers";
+import hardhatVerify from "@nomicfoundation/hardhat-verify";
+import { config as dotenvConfig } from "dotenv";
+
+dotenvConfig();
 
 export default defineConfig({
   // Coverage: run `yarn coverage` (uses this config + --coverage; reports in coverage/ as lcov & HTML).
@@ -11,6 +15,7 @@ export default defineConfig({
     hardhatViemAssertions,
     hardhatNodeTestRunner,
     hardhatNetworkHelpers,
+    hardhatVerify,
   ],
   solidity: {
     // Coverage injects a library with pragma >=0.4.22; avoid 0.4.18 so it is not selected (use COVERAGE=1 + exclude WBNB).
@@ -103,6 +108,14 @@ export default defineConfig({
       gasPrice: "auto",
       accounts: [configVariable("TCG_KEY")],
     },
+    tenderly: {
+      type: "http",
+      chainType: "l1",
+      url: configVariable("TENDERLY_RPC_URL"),
+      chainId: 1,
+      gasPrice: "auto",
+      accounts: [configVariable("TCG_KEY")],
+    },
     arbitrum: {
       type: "http",
       chainType: "l1",
@@ -118,6 +131,14 @@ export default defineConfig({
       chainId: 421614,
       gasPrice: "auto",
       accounts: [configVariable("TCG_KEY")],
+    },
+  },
+  verify: {
+    etherscan: {
+      apiKey: process.env.BSC_SCAN_API_KEY ?? "",
+    },
+    blockscout: {
+      enabled: false,
     },
   },
 });

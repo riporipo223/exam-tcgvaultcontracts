@@ -16,9 +16,9 @@ import {
  *
  * Presale flow is covered by scripts/testFullFlowOnBSCFork.ts. This script validates DEX and BuyRouter:
  *   Phase 1 — Deploy: TCGVaultToken, TCGNexusToken, TCGVaultBuyRouter (USDC), TCGVaultLiquidityWrapper (MockPresaleLaunch for initial supply)
- *   Phase 2 — Pair TCGV/WBNB + TCGV/USDC, add liquidity via wrapper (no addLiquidityETH; use WBNB + addLiquidity)
- *   Phase 3 — Buy: PancakeSwap BNB→TCGV (3.1), TCGVaultBuyRouter USDC→TCGV (3.2), direct pair (3.3), dummy router (5.2)
- *   Phase 4 — Sell: PancakeSwap TCGV→BNB (4.1), TCGVaultBuyRouter TCGV→USDC (4.2)
+ *   Phase 2 — Pair TCGV/USDC only, add liquidity via wrapper
+ *   Phase 3 — Buy: PancakeSwap USDC→TCGV (3.1), TCGVaultBuyRouter USDC→TCGV (3.2), direct pair USDC→TCGV (3.3), dummy router USDC (5.2)
+ *   Phase 4 — Sell: PancakeSwap TCGV→USDC (4.1), TCGVaultBuyRouter TCGV→USDC (4.2)
  *
  * Recommended (Hardhat fork, no Anvil):
  *   BSC_RPC_URL="https://your-bsc-rpc" yarn hardhat run scripts/testOnBSCFork.ts --network hardhat
@@ -61,16 +61,13 @@ async function setBSCUSDCBalance(
   }
 }
 
-// Same BNB amount for Pancake/direct/dummy buy routes.
-const COMPARE_BUY_BNB = parseEther("0.05");
-// Same USDC amount for BuyRouter buy (6 decimals).
+// Same USDC amount for Pancake / BuyRouter / direct pair / dummy router (6 decimals).
 const COMPARE_BUY_USDC = 1_000n * USDC_6;
 // Same TCGV amount for both sell routes.
 const COMPARE_SELL_TCGV = parseEther("10000");
 
 // Whitepaper tokenomics (§5) — used for assertions
 const BUY_TAX_BP = 1500; // 15% (Pancake direct: token buy tax)
-const BUY_BNB_TAX_BP = 1300; // 13% BNB (BuyRouter path: 10% vault + 3% marketing)
 const BUY_VAULT_BP = 1000; // 10% of total to vault
 const BUY_MARKETING_BP = 300; // 3% of total
 const BUY_TCGV_BURN_BP = 200; // 2% of TCGV received burned (BuyRouter path)
@@ -89,8 +86,7 @@ async function main() {
   }
   const deployer = wallets[0]!;
   const trader = wallets[1]!;
-  // Use dedicated receiver contracts so inbound BNB can be verified reliably on fork nodes.
-  // Some fork backends don't reflect inbound transfers in `eth_getBalance` for prefunded dev accounts.
+  // Use dedicated receiver contracts so fee receipts can be verified reliably on fork nodes.
   const vaultReceiver = await viem.deployContract("FeeReceiver", [], {
     client: { wallet: deployer },
   });
@@ -150,11 +146,15 @@ async function main() {
 
   const pancakeRouter = await viem.getContractAt("PancakeRouter", PANCAKE_ROUTER);
   const pancakeFactory = await viem.getContractAt("PancakeFactory", PANCAKE_FACTORY);
-  const wbnbAddress = (await pancakeRouter.read.WETH()) as Address;
-  const wbnb = await viem.getContractAt("WBNB", wbnbAddress);
+  const routerCode = await publicClient.getCode({ address: PANCAKE_ROUTER });
+  if (!routerCode || routerCode === "0x") {
+    throw new Error(
+      "Pancake router code not found on current network. Ensure Hardhat is running with a valid BSC fork RPC (set BSC_RPC_URL), e.g. `BSC_RPC_URL=https://bsc-dataseed.binance.org yarn fork:dex`."
+    );
+  }
+  const wbnbAddress = (await pancakeRouter.read.WETH()) as Address; // dummy PancakeRouter constructor only
   console.log("PancakeSwap Router:", PANCAKE_ROUTER);
   console.log("PancakeSwap Factory:", PANCAKE_FACTORY);
-  console.log("WBNB:", wbnbAddress);
   console.log();
 
   // ---------------------------------------------------------------------------
@@ -163,40 +163,56 @@ async function main() {
   console.log("--- Phase 1: Deployment ---");
   console.log();
 
-  let nonce = await publicClient.getTransactionCount({ address: deployer.account.address });
+  let nonce = BigInt(
+    await publicClient.getTransactionCount({ address: deployer.account.address, blockTag: "pending" })
+  );
 
-  console.log("1.1 Deploying TCGVaultToken...");
+  // Deployment order:
+  //   nonce + 0: MockPresaleLaunch
+  //   nonce + 1: TCGNexusToken
+  //   nonce + 2: TCGVaultToken
+  const mockPresaleLaunchAddress = getContractAddress({ from: deployer.account.address, nonce }) as Address;
+  const nexusTokenAddress = getContractAddress({ from: deployer.account.address, nonce: nonce + 1n }) as Address;
+  const futureTcgvAddr = getContractAddress({ from: deployer.account.address, nonce: nonce + 2n }) as Address;
+
+  console.log("1.1 Deploying MockPresaleLaunch (immutable presale finalizer for TCGV)...");
+  await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], {
+    client: { wallet: deployer },
+  });
+  nonce += 1n;
+  const mockPresaleLaunch = await viem.getContractAt(
+    "contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch",
+    mockPresaleLaunchAddress
+  );
+  console.log(`    MockPresaleLaunch: ${mockPresaleLaunchAddress}`);
+  console.log();
+
+  console.log("1.2 Deploying TCGNexusToken (minter = predicted TCGV)...");
+  await viem.deployContract("contracts/TCGNexusToken.sol:TCGNexusToken", [futureTcgvAddr], {
+    client: { wallet: deployer },
+  });
+  nonce += 1n;
+  const nexusToken = await viem.getContractAt("TCGNexusToken", nexusTokenAddress);
+  console.log(`    TCGNexusToken: ${nexusTokenAddress}`);
+  console.log();
+
+  console.log("1.3 Deploying TCGVaultToken (immutable NEXUS + immutable presaleFinalizer)...");
   await viem.deployContract("TCGVaultToken", [
     PANCAKE_ROUTER,
     vaultAddr,
     marketingAddr,
     communityAddr,
-    zeroAddress,
+    nexusTokenAddress,
+    mockPresaleLaunchAddress,
   ], { client: { wallet: deployer } });
-  const tokenAddress = getContractAddress({ from: deployer.account.address, nonce: BigInt(nonce++) }) as Address;
+  const tokenAddress = getContractAddress({ from: deployer.account.address, nonce }) as Address;
+  nonce += 1n;
   const token = await viem.getContractAt("TCGVaultToken", tokenAddress);
   console.log(`    TCGVaultToken: ${tokenAddress}`);
   console.log(`    Total supply:  ${formatEther((await token.read.totalSupply()))} TCGV`);
   console.log();
 
-  console.log("1.2 Deploying TCGNexusToken...");
-  await viem.deployContract("contracts/TCGNexusToken.sol:TCGNexusToken", [tokenAddress], { client: { wallet: deployer } });
-  const nexusTokenAddress = getContractAddress({ from: deployer.account.address, nonce: BigInt(nonce++) }) as Address;
-  const nexusToken = await viem.getContractAt("TCGNexusToken", nexusTokenAddress);
-  console.log(`    TCGNexusToken: ${nexusTokenAddress}`);
-  console.log();
-
-  console.log("1.3 Setting Nexus on TCGVaultToken...");
-  await token.write.setAddresses([
-    vaultAddr,
-    marketingAddr,
-    communityAddr,
-    nexusTokenAddress,
-  ], { account: deployer.account });
-  console.log("    Nexus set.");
-  console.log();
-
-  console.log("1.3b Fund deployer & trader with BSC USDC (cheatcode)...");
+  console.log("1.4 Fund deployer & trader with BSC USDC (cheatcode)...");
   const usdc = await viem.getContractAt("BEP20TokenImplementation", BSC_USDC);
   const bigUsdc = 50_000_000n * USDC_6;
   await setBSCUSDCBalance(deployer.account.address, BSC_USDC, bigUsdc, setStorageAt, usdc);
@@ -209,7 +225,7 @@ async function main() {
   console.log(`    Deployer USDC: ${deployerUsdc.toString()}, Trader USDC: ${(await usdc.read.balanceOf([trader.account.address])).toString()}`);
   console.log();
 
-  console.log("1.4 Deploying TCGVaultBuyRouter (USDC)...");
+  console.log("1.5 Deploying TCGVaultBuyRouter (USDC)...");
   const buyRouter = await viem.deployContract("TCGVaultBuyRouter", [
     PANCAKE_ROUTER,
     BSC_USDC,
@@ -223,26 +239,21 @@ async function main() {
   console.log(`    TCGVaultBuyRouter: ${buyRouterAddress} (set as buy router)`);
   console.log();
 
-  console.log("1.5 Deploying TCGVaultLiquidityWrapper...");
+  console.log("1.6 Deploying TCGVaultLiquidityWrapper...");
   const wrapper = await viem.deployContract(
     "contracts/TCGVaultLiquidityWrapper.sol:TCGVaultLiquidityWrapper",
     [tokenAddress, PANCAKE_ROUTER],
     { client: { wallet: deployer } },
   );
   const wrapperAddress = wrapper.address as Address;
-  await token.write.setLiquidityWrapper([wrapperAddress], { account: deployer.account });
   await token.write.setExcludedFromFees([wrapperAddress, true], { account: deployer.account });
   console.log(`    TCGVaultLiquidityWrapper: ${wrapperAddress} (set as liquidity wrapper, excluded from fees)`);
   console.log();
 
-  console.log("1.6 Presale finalizer and initial mint (no constructor mint)...");
-  const mockPresaleLaunch = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], {
-    client: { wallet: deployer },
-  });
-  await token.write.setPresaleFinalizer([mockPresaleLaunch.address as Address], { account: deployer.account });
+  console.log("1.7 Initial mint via immutable presale finalizer (no constructor mint)...");
   const initialMint = parseEther("1000000000");
   await mockPresaleLaunch.write.mintPresale([tokenAddress, deployer.account.address, initialMint], { account: deployer.account });
-  console.log(`    MockPresaleLaunch: ${mockPresaleLaunch.address}; minted ${formatEther(initialMint)} TCGV to deployer for liquidity & tests`);
+  console.log(`    MockPresaleLaunch: ${mockPresaleLaunchAddress}; minted ${formatEther(initialMint)} TCGV to deployer for liquidity & tests`);
   console.log();
 
   // ---------------------------------------------------------------------------
@@ -251,55 +262,23 @@ async function main() {
   console.log("--- Phase 2: Configure & add liquidity ---");
   console.log();
 
-  console.log("2.1 Create/get PancakeSwap pair TCGV/WBNB...");
-  let pairAddress = (await pancakeFactory.read.getPair([tokenAddress, wbnbAddress])) as Address;
+  console.log("2.1 Create/get PancakeSwap pair TCGV/USDC...");
+  let pairAddress = (await pancakeFactory.read.getPair([tokenAddress, BSC_USDC])) as Address;
   if (pairAddress === zeroAddress) {
-    const createHash = await pancakeFactory.write.createPair([tokenAddress, wbnbAddress], {
+    const createUsdcHash = await pancakeFactory.write.createPair([tokenAddress, BSC_USDC], {
       account: deployer.account,
     });
-    await publicClient.waitForTransactionReceipt({ hash: createHash });
-    pairAddress = (await pancakeFactory.read.getPair([tokenAddress, wbnbAddress])) as Address;
+    await publicClient.waitForTransactionReceipt({ hash: createUsdcHash });
+    pairAddress = (await pancakeFactory.read.getPair([tokenAddress, BSC_USDC])) as Address;
     console.log("    Pair created:", pairAddress);
   } else {
     console.log("    Pair exists: ", pairAddress);
   }
-  await token.write.setPair([pairAddress], { account: deployer.account });
-  console.log("    Pair set on token.");
+  await token.write.setPair([pairAddress, true], { account: deployer.account });
+  console.log("    Pair set on token (canonical TCGV/USDC).");
   console.log();
 
-  console.log("2.2 Add liquidity TCGV/WBNB via wrapper...");
-  const tokenAmount = parseEther("1000000");
-  const ethAmount = parseEther("10");
-  await wbnb.write.deposit({ value: ethAmount, account: deployer.account });
-  await token.write.approve([wrapperAddress, tokenAmount], { account: deployer.account });
-  await wbnb.write.approve([wrapperAddress, ethAmount], { account: deployer.account });
-  const addLiqHash = await wrapper.write.addLiquidity([
-    PANCAKE_ROUTER,
-    wbnbAddress,
-    tokenAmount,
-    ethAmount,
-    0n,
-    0n,
-    deadline,
-  ], { account: deployer.account });
-  await publicClient.waitForTransactionReceipt({ hash: addLiqHash });
-  console.log(`    Liquidity: ${formatEther(tokenAmount)} TCGV + ${formatEther(ethAmount)} WBNB`);
-  const pair = await viem.getContractAt("contracts/test/PancakePair.sol:PancakePair", pairAddress);
-  const [reserve0, reserve1] = await (pair as any).read.getReserves();
-  const token0 = await (pair as any).read.token0();
-  const isToken0TCGV = token0.toLowerCase() === tokenAddress.toLowerCase();
-  const tcgvReserve = isToken0TCGV ? reserve0 : reserve1;
-  const wbnbReserve = isToken0TCGV ? reserve1 : reserve0;
-  console.log(`    Reserves: ${formatEther(tcgvReserve)} TCGV / ${formatEther(wbnbReserve)} WBNB`);
-  console.log();
-
-  console.log("2.3 Create TCGV/USDC pair and add liquidity (for BuyRouter)...");
-  let pairUsdcAddress = (await pancakeFactory.read.getPair([tokenAddress, BSC_USDC])) as Address;
-  if (pairUsdcAddress === zeroAddress) {
-    await pancakeFactory.write.createPair([tokenAddress, BSC_USDC], { account: deployer.account });
-    pairUsdcAddress = (await pancakeFactory.read.getPair([tokenAddress, BSC_USDC])) as Address;
-    console.log("    TCGV/USDC pair created:", pairUsdcAddress);
-  }
+  console.log("2.2 Add liquidity TCGV/USDC via wrapper...");
   const tcgvForUsdc = parseEther("500000");
   const usdcForPair = 50_000n * USDC_6;
   await token.write.approve([wrapperAddress, tcgvForUsdc], { account: deployer.account });
@@ -315,10 +294,13 @@ async function main() {
   ], { account: deployer.account });
   await publicClient.waitForTransactionReceipt({ hash: addLiqUsdcHash });
   console.log(`    Liquidity: ${formatEther(tcgvForUsdc)} TCGV + ${Number(usdcForPair) / 1e6} USDC`);
-  // Make the TCGV/USDC pool the canonical taxed pair; disable TCGV/WBNB as a fee pair.
-  await token.write.setPair([pairUsdcAddress], { account: deployer.account });
-  await token.write.setPairStatus([pairAddress, false], { account: deployer.account });
-  console.log("    Pair set on token: TCGV/USDC (TCGV/WBNB disabled for fees).");
+  const pair = await viem.getContractAt("contracts/test/PancakePair.sol:PancakePair", pairAddress);
+  const [reserve0, reserve1] = await (pair as any).read.getReserves();
+  const token0 = await (pair as any).read.token0();
+  const isToken0TCGV = token0.toLowerCase() === tokenAddress.toLowerCase();
+  const tcgvReserve = isToken0TCGV ? reserve0 : reserve1;
+  const usdcReserve = isToken0TCGV ? reserve1 : reserve0;
+  console.log(`    Reserves: ${formatEther(tcgvReserve)} TCGV / ${Number(usdcReserve) / 1e6} USDC`);
   console.log();
 
   // Explicit gas limit to avoid "gas required exceeds allowance: 0" on some BSC fork RPCs
@@ -346,7 +328,7 @@ async function main() {
   if (burnTransfer !== 0n) {
     throw new Error(`2.3 Trader→fresh: expected 0 burn, got ${formatEther(burnTransfer)}`);
   }
-  console.log(`    Deployer → Trader: ${formatEther(simpleTransferAmount)} TCGV (no fee, deployer excluded).`);
+  console.log(`    Deployer → Trader: ${formatEther(simpleTransferAmount)} TCGV (no fee, regular transfer).`);
   console.log(`    Trader → Fresh ${freshReceiver}: ${formatEther(amountToFresh)} TCGV received, burn: ${formatEther(burnTransfer)} (regular transfer, no fee/no burn).`);
   console.log("    [OK] 2.3 Simple transfer to fresh address: no fee, no burn.");
   console.log();
@@ -357,31 +339,32 @@ async function main() {
   console.log("--- Phase 3: Buy flows ---");
   console.log();
 
-  const path = [wbnbAddress, tokenAddress];
+  const pathUsdcTcgv = [BSC_USDC, tokenAddress];
   let minAmountOutRouter = 0n;
   try {
-    const amountsOut = (await pancakeRouter.read.getAmountsOut([COMPARE_BUY_BNB, path]));
+    const amountsOut = (await pancakeRouter.read.getAmountsOut([COMPARE_BUY_USDC, pathUsdcTcgv]));
     minAmountOutRouter = amountsOut[1] > 0n ? (amountsOut[1] * 50n) / 100n : 0n;
   } catch {
     minAmountOutRouter = 0n;
   }
 
-  console.log("3.1 Buy via PancakeSwap router (swapExactETHForTokensSupportingFeeOnTransferTokens)...");
-  const buyAmountBNB = COMPARE_BUY_BNB;
-  console.log(`    BNB in: ${formatEther(buyAmountBNB)} (compare amount)`);
+  console.log("3.1 Buy via PancakeSwap router (swapExactTokensForTokensSupportingFeeOnTransferTokens, USDC→TCGV)...");
+  const buyUsdc1 = COMPARE_BUY_USDC;
+  console.log(`    USDC in: ${Number(buyUsdc1) / 1e6} (compare amount)`);
   const traderTcgvBefore1 = (await token.read.balanceOf([trader.account.address]));
   const vaultTcgvBefore1 = (await token.read.balanceOf([vaultAddr]));
   const supplyBefore1 = (await token.read.totalSupply());
 
+  await usdc.write.approve([PANCAKE_ROUTER, buyUsdc1], { account: trader.account });
   const swapCalldata = encodeFunctionData({
     abi: pancakeRouter.abi,
-    functionName: "swapExactETHForTokensSupportingFeeOnTransferTokens",
-    args: [minAmountOutRouter, path, trader.account.address, deadline],
+    functionName: "swapExactTokensForTokensSupportingFeeOnTransferTokens",
+    args: [buyUsdc1, minAmountOutRouter, pathUsdcTcgv, trader.account.address, deadline],
   });
   const swapHash = await trader.sendTransaction({
     to: PANCAKE_ROUTER,
     data: swapCalldata,
-    value: buyAmountBNB,
+    value: 0n,
   });
   const swapReceipt = await publicClient.waitForTransactionReceipt({ hash: swapHash });
   if (!swapReceipt || swapReceipt.status === "reverted") {
@@ -402,8 +385,8 @@ async function main() {
   if (traderDelta1 === 0n) {
     throw new Error("3.1 Pancake buy: trader received 0 TCGV");
   }
-  const comparePancake = { bnb: buyAmountBNB, traderTcgv: traderDelta1, burned: burn1 };
-  console.log("    [OK] 3.1 Pancake buy executed (see fee/burn above; detailed economics covered in unit tests)");
+  const comparePancake = { usdc: buyUsdc1, traderTcgv: traderDelta1, burned: burn1 };
+  console.log("    [OK] 3.1 Pancake USDC→TCGV buy executed (see fee/burn above; detailed economics covered in unit tests)");
   console.log();
 
   console.log("3.2 Buy via TCGVaultBuyRouter (USDC, NEXUS cashback)...");
@@ -527,25 +510,22 @@ async function main() {
   console.log("    Dummy router:", dummyRouterAddress);
   console.log();
 
-  console.log("3.3 Direct pair swap (WBNB → TCGV, no router)...");
-  const directBNB = COMPARE_BUY_BNB;
-  console.log(`    BNB in: ${formatEther(directBNB)} (compare amount)`);
-  await wbnb.write.deposit({ value: directBNB, account: trader.account });
+  console.log("3.3 Direct pair swap (USDC → TCGV, no router)...");
+  const directUsdc = COMPARE_BUY_USDC;
+  console.log(`    USDC in: ${Number(directUsdc) / 1e6} (compare amount)`);
 
   const traderTcgvBefore3 = (await token.read.balanceOf([trader.account.address]));
   const supplyBefore3 = (await token.read.totalSupply());
   // Use dummy router's getAmountsOut so 3.3 and 5.2 use the same formula (official router can use a different fee constant).
-  const directPath = [wbnbAddress, tokenAddress];
-  const amountsOutDirect = await (dummyRouter as any).read.getAmountsOut([directBNB, directPath]);
+  const amountsOutDirect = await (dummyRouter as any).read.getAmountsOut([directUsdc, pathUsdcTcgv]);
   const amountOut = amountsOutDirect[1];
   if (amountOut === 0n) {
     throw new Error("3.3 getAmountsOut returned 0 TCGV for direct swap; check pair liquidity");
   }
-  // We are swapping WBNB -> TCGV, so the out token is TCGV.
   const amount0Out = isToken0TCGV ? amountOut : 0n;
   const amount1Out = isToken0TCGV ? 0n : amountOut;
 
-  await wbnb.write.transfer([pairAddress, directBNB], { account: trader.account });
+  await usdc.write.transfer([pairAddress, directUsdc], { account: trader.account });
   const pairSwapCalldata = encodeFunctionData({
     abi: pair.abi,
     functionName: "swap",
@@ -563,37 +543,38 @@ async function main() {
   const burn3 = supplyBefore3 - supplyAfter3;
   console.log(`    Trader TCGV: +${formatEther(traderTcgvAfter3 - traderTcgvBefore3)}`);
   console.log(`    Burned:      ${formatEther(burn3)} TCGV (totalSupply: ${formatEther(supplyBefore3)} → ${formatEther(supplyAfter3)})`);
-  const compareDirect = { bnb: directBNB, traderTcgv: traderTcgvAfter3 - traderTcgvBefore3, burned: burn3 };
-  console.log("    [OK] 3.3 Direct swap executed (BNB path; fee/burn may differ from USDC canonical pool)");
+  const compareDirect = { usdc: directUsdc, traderTcgv: traderTcgvAfter3 - traderTcgvBefore3, burned: burn3 };
+  console.log("    [OK] 3.3 Direct USDC→TCGV swap executed on canonical pair");
   console.log();
 
   // ---------------------------------------------------------------------------
-  // Phase 5: Buy via dummy router (before any sell — same BNB as 3.1/3.3 for comparison)
+  // Phase 5: Buy via dummy router (before any sell — same USDC as 3.1/3.3 for comparison)
   // ---------------------------------------------------------------------------
   console.log("--- Phase 5: Buy via dummy router (fee parity, before any sell) ---");
   console.log();
 
-  console.log("5.2 Buy TCGV via dummy router (swapExactETHForTokensSupportingFeeOnTransferTokens)...");
-  const dummyBuyBNB = COMPARE_BUY_BNB;
-  console.log(`    BNB in: ${formatEther(dummyBuyBNB)} (compare amount)`);
+  console.log("5.2 Buy TCGV via dummy router (swapExactTokensForTokensSupportingFeeOnTransferTokens, USDC→TCGV)...");
+  const dummyBuyUsdc = COMPARE_BUY_USDC;
+  console.log(`    USDC in: ${Number(dummyBuyUsdc) / 1e6} (compare amount)`);
   const supplyBeforeDummy = await token.read.totalSupply();
   const traderTcgvBeforeDummy = await token.read.balanceOf([trader.account.address]);
   let minOutDummy = 0n;
   try {
-    const amountsDummy = await (dummyRouter as any).read.getAmountsOut([dummyBuyBNB, path]);
+    const amountsDummy = await (dummyRouter as any).read.getAmountsOut([dummyBuyUsdc, pathUsdcTcgv]);
     minOutDummy = amountsDummy[1] > 0n ? (amountsDummy[1] * 50n) / 100n : 0n;
   } catch {
     minOutDummy = 0n;
   }
+  await usdc.write.approve([dummyRouterAddress, dummyBuyUsdc], { account: trader.account });
   const dummyCalldata = encodeFunctionData({
     abi: (dummyRouter as any).abi,
-    functionName: "swapExactETHForTokensSupportingFeeOnTransferTokens",
-    args: [minOutDummy, path, trader.account.address, deadline],
+    functionName: "swapExactTokensForTokensSupportingFeeOnTransferTokens",
+    args: [dummyBuyUsdc, minOutDummy, pathUsdcTcgv, trader.account.address, deadline],
   });
   const dummyHash = await trader.sendTransaction({
     to: dummyRouterAddress,
     data: dummyCalldata,
-    value: dummyBuyBNB,
+    value: 0n,
   });
   await publicClient.waitForTransactionReceipt({ hash: dummyHash });
   const supplyAfterDummy = await token.read.totalSupply();
@@ -606,16 +587,16 @@ async function main() {
   if (traderDeltaDummy === 0n) {
     throw new Error("5.2 Dummy router buy: trader received 0 TCGV");
   }
-  const compareDummy = { bnb: dummyBuyBNB, traderTcgv: traderDeltaDummy, burned: burnDummy };
-  console.log("    [OK] 5.2 Dummy router buy executed (BNB path; fee/burn may differ from USDC canonical pool)");
+  const compareDummy = { usdc: dummyBuyUsdc, traderTcgv: traderDeltaDummy, burned: burnDummy };
+  console.log("    [OK] 5.2 Dummy router USDC→TCGV buy executed");
   console.log();
 
   // --- Buy comparison ---
   const buyRows = [
-    { name: "PancakeSwap router (3.1)", ...comparePancake, inputLabel: "BNB" as const, inputAmount: comparePancake.bnb },
-    { name: "TCGVaultBuyRouter (3.2)", ...compareBuyRouter, inputLabel: "USDC" as const, inputAmount: compareBuyRouter.usdc },
-    { name: "Direct pair swap (3.3)", ...compareDirect, inputLabel: "BNB" as const, inputAmount: compareDirect.bnb },
-    { name: "Dummy router (5.2)", ...compareDummy, inputLabel: "BNB" as const, inputAmount: compareDummy.bnb },
+    { name: "PancakeSwap router (3.1)", ...comparePancake, inputAmount: comparePancake.usdc },
+    { name: "TCGVaultBuyRouter (3.2)", ...compareBuyRouter, inputAmount: compareBuyRouter.usdc },
+    { name: "Direct pair swap (3.3)", ...compareDirect, inputAmount: compareDirect.usdc },
+    { name: "Dummy router (5.2)", ...compareDummy, inputAmount: compareDummy.usdc },
   ];
   let bestBuyIdx = 0;
   for (let i = 1; i < buyRows.length; i++) {
@@ -625,7 +606,7 @@ async function main() {
   console.log("    Route                      | In        | Trader TCGV   | Burned TCGV");
   console.log("    ---------------------------|-----------|---------------|---------------");
   for (const row of buyRows) {
-    const inStr = row.inputLabel === "USDC" ? `${Number(row.inputAmount) / 1e6} USDC` : formatEther(row.inputAmount) + " BNB";
+    const inStr = `${Number(row.inputAmount) / 1e6} USDC`;
     console.log(
       `    ${row.name.padEnd(28)} | ${inStr.padStart(9)} | ${formatEther(row.traderTcgv).padStart(13)} | ${formatEther(row.burned).padStart(13)}`
     );
@@ -645,7 +626,7 @@ async function main() {
   console.log(`    Using same TCGV amount for both sell routes: ${formatEther(sellAmountFixed)} (comparison)`);
   console.log();
 
-  console.log("4.1 Sell via PancakeSwap router (swapExactTokensForETHSupportingFeeOnTransferTokens)...");
+  console.log("4.1 Sell via PancakeSwap router (swapExactTokensForTokensSupportingFeeOnTransferTokens, TCGV→USDC)...");
   const sellAmount1 = sellAmountFixed;
   await token.write.approve([PANCAKE_ROUTER, sellAmount1], { account: trader.account });
   const vaultTcgvBefore4 = (await token.read.balanceOf([vaultAddr]));
@@ -807,8 +788,8 @@ async function main() {
   console.log("TCGVaultLiquidityWrapper:", wrapperAddress);
   console.log("PancakeSwap Pair:        ", pairAddress);
   console.log("Dummy router (Phase 5):  ", dummyRouterAddress);
-  console.log("Vault (BNB/TCGV):       ", vaultAddr);
-  console.log("Marketing (BNB/TCGV):    ", marketingAddr);
+  console.log("Vault (fees):            ", vaultAddr);
+  console.log("Marketing (fees):        ", marketingAddr);
   console.log("Community (TCGV):        ", communityAddr);
   console.log();
   console.log("Tokenomics (whitepaper §5, §6) verified:");
@@ -816,7 +797,7 @@ async function main() {
   console.log("  Buy (BuyRouter):      13% USDC (10% vault, 3% marketing) + 2% TCGV burn + NEXUS cashback");
   console.log("  Sell: 10% (4% vault, 3% LP, 1% marketing, 1% community, 1% burn)");
   console.log();
-  console.log("Flow: Deploy → Pair & Liquidity (TCGV/WBNB + TCGV/USDC) → Buy 4 routes → Sell 2 routes (BNB + USDC).");
+  console.log("Flow: Deploy → TCGV/USDC pair & liquidity → Buy 4 routes (all USDC in) → Sell 2 routes (TCGV→USDC).");
   console.log("All steps completed successfully.");
 }
 
