@@ -28,6 +28,9 @@ node_modules/
 .env*
 !.env*example*
 
+# Post-deploy cache (subgraph sync)
+.cache/
+
 # Log
 logs
 *.log

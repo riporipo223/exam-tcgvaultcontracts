@@ -19,8 +19,13 @@
  *   - TEAM_RECIPIENT — post-presale token allocation recipient (with LIQUIDITY_RECIPIENT, OPS_RECIPIENT)
  *   - USDC_ADDRESS — skip MockUSDC deploy and use this 6-decimal stablecoin
  *   - SKIP_TCGR=1 — do not deploy TCGR + converter
+ *   - SKIP_SUBGRAPH_SYNC=1 — after deploy, skip `yarn update:subgraph:abis` + subgraph `yarn sync:pipeline`
+ *   - Manual subgraph cache (`.cache/last-bsctest-deploy.json`): if `stakingVault` / `basicNFT` are null,
+ *     set `STAKING_VAULT_ADDRESS` and `BASIC_NFT_ADDRESS` when running subgraph `sync:pipeline`.
  *   - MOCK_USDC_MINT_DEPLOYER=0 — when deploying MockUSDC, skip minting 1M USDC to deployer
  *   - BASIC_NFT_MIN_STAKE — min stake as **decimal TCGV string** (e.g. `5000`); parsed with `parseEther` (default: `5000`)
+ *
+ * If TCGR is skipped, subgraph/Turbo sync is skipped (manifest requires TCGR + converter addresses).
  *
  * Usage:
  *   yarn deploy:bsctest
@@ -28,7 +33,10 @@
 
 import hre from "hardhat";
 import { formatEther, getContractAddress, parseEther, type Address } from "viem";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const CHAIN_ID_BSC_TESTNET = 97n;
 
@@ -37,6 +45,10 @@ const PANCAKE_FACTORY_TESTNET = "0x6725F303b657a9451d8BA641348b6761A6CC7a17" as 
 const PANCAKE_ROUTER_TESTNET = "0xD99D1c33F9fC3444f8101754aBC46c52416550D1" as Address;
 
 const USDC_6 = 1_000_000n;
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const CONTRACTS_ROOT = join(__dirname, "..");
+const SUBGRAPH_DEPLOY_CACHE = join(CONTRACTS_ROOT, ".cache", "last-bsctest-deploy.json");
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -94,10 +106,49 @@ function readRequiredAddress(name: string): Address | undefined {
   return v as Address;
 }
 
+function runSubgraphSyncAfterDeploy(deployJsonPath: string): void {
+  console.log("\n--- Subgraph + Turbo sync ---");
+  const subgraphRoot = join(CONTRACTS_ROOT, "..", "subgraph");
+  const r1 = spawnSync("yarn", ["update:subgraph:abis"], {
+    cwd: CONTRACTS_ROOT,
+    stdio: "inherit",
+    env: process.env,
+  });
+  if (r1.status !== 0) {
+    process.exit(r1.status ?? 1);
+  }
+  const r2 = spawnSync("yarn", ["sync:pipeline"], {
+    cwd: subgraphRoot,
+    stdio: "inherit",
+    env: { ...process.env, DEPLOY_JSON: deployJsonPath },
+  });
+  if (r2.status !== 0) {
+    process.exit(r2.status ?? 1);
+  }
+}
+
 async function main() {
   const { viem } = await hre.network.connect();
   const [deployer] = await viem.getWalletClients();
   const publicClient = await viem.getPublicClient();
+  const deploymentBlocks: bigint[] = [];
+
+  async function deployTracked(
+    contractName: string,
+    constructorArgs: readonly unknown[] = [],
+    deployConfig: { client?: { wallet: typeof deployer } } = {},
+  ): Promise<{ address: Address }> {
+    const { contract, deploymentTransaction } = await viem.sendDeploymentTransaction(
+      contractName as never,
+      constructorArgs as never,
+      deployConfig as never,
+    );
+    const receipt = await publicClient.waitForTransactionReceipt({
+      hash: deploymentTransaction.hash,
+    });
+    deploymentBlocks.push(receipt.blockNumber);
+    return contract as { address: Address };
+  }
 
   const deployerAddr = deployer.account.address as Address;
   const vaultAddr = readRequiredAddress("VAULT_ADDRESS");
@@ -142,7 +193,7 @@ async function main() {
     console.log("Using USDC_ADDRESS:", usdcAddress);
   } else {
     console.log("Deploying MockUSDC (6 decimals, testnet — open mint)…");
-    const mock = await viem.deployContract("contracts/test/MockUSDC.sol:MockUSDC", [], {
+    const mock = await deployTracked("contracts/test/MockUSDC.sol:MockUSDC", [], {
       client: { wallet: deployer },
     });
     usdcAddress = mock.address as Address;
@@ -173,7 +224,7 @@ async function main() {
 
   console.log("--- Core (CREATE2-style nonce prediction) ---");
 
-  await viem.deployContract("contracts/TCGNexusToken.sol:TCGNexusToken", [tokenAddress], {
+  await deployTracked("contracts/TCGNexusToken.sol:TCGNexusToken", [tokenAddress], {
     client: { wallet: deployer },
   });
   nonce += 1n;
@@ -184,14 +235,18 @@ async function main() {
     contract: "contracts/TCGNexusToken.sol:TCGNexusToken",
   });
 
-  await viem.deployContract("TCGVaultToken", [
-    PANCAKE_ROUTER_TESTNET,
-    vaultAddr,
-    marketingAddr,
-    communityAddr,
-    nexusTokenAddress,
-    initialLaunchAddress,
-  ], { client: { wallet: deployer } });
+  await deployTracked(
+    "TCGVaultToken",
+    [
+      PANCAKE_ROUTER_TESTNET,
+      vaultAddr,
+      marketingAddr,
+      communityAddr,
+      nexusTokenAddress,
+      initialLaunchAddress,
+    ],
+    { client: { wallet: deployer } },
+  );
   nonce += 1n;
   console.log("TCGVaultToken:", tokenAddress);
   verifyJobs.push({
@@ -207,15 +262,13 @@ async function main() {
     contract: "contracts/TCGVaultToken.sol:TCGVaultToken",
   });
 
-  await viem.deployContract("TCGVaultFounderNFT", [
-    usdcAddress,
-    nexusTokenAddress,
-    vaultAddr,
-    liquidityRecipient,
-    opsRecipient,
-  ], {
-    client: { wallet: deployer },
-  });
+  await deployTracked(
+    "TCGVaultFounderNFT",
+    [usdcAddress, nexusTokenAddress, vaultAddr, liquidityRecipient, opsRecipient],
+    {
+      client: { wallet: deployer },
+    },
+  );
   nonce += 1n;
   console.log("TCGVaultFounderNFT:", founderNFTAddress);
   verifyJobs.push({
@@ -224,13 +277,11 @@ async function main() {
     contract: "contracts/TCGVaultFounderNFT.sol:TCGVaultFounderNFT",
   });
 
-  await viem.deployContract("TCGVaultInitialLaunch", [
-    tokenAddress,
-    usdcAddress,
-    founderNFTAddress,
-    nexusTokenAddress,
-    treasuryAddr,
-  ], { client: { wallet: deployer } });
+  await deployTracked(
+    "TCGVaultInitialLaunch",
+    [tokenAddress, usdcAddress, founderNFTAddress, nexusTokenAddress, treasuryAddr],
+    { client: { wallet: deployer } },
+  );
   nonce += 1n;
   console.log("TCGVaultInitialLaunch:", initialLaunchAddress);
   verifyJobs.push({
@@ -268,7 +319,7 @@ async function main() {
   console.log();
 
   console.log("--- Staking vault + Basic NFT (ERC-4626 + soulbound gate) ---");
-  const stakingVault = await viem.deployContract("TCGVaultStakingVault", [tokenAddress], {
+  const stakingVault = await deployTracked("TCGVaultStakingVault", [tokenAddress], {
     client: { wallet: deployer },
   });
   const stakingVaultAddress = stakingVault.address as Address;
@@ -279,7 +330,7 @@ async function main() {
     contract: "contracts/TCGVaultStakingVault.sol:TCGVaultStakingVault",
   });
 
-  const basicNFT = await viem.deployContract("TCGVaultBasicNFT", [stakingVaultAddress], {
+  const basicNFT = await deployTracked("TCGVaultBasicNFT", [stakingVaultAddress], {
     client: { wallet: deployer },
   });
   const basicNFTAddress = basicNFT.address as Address;
@@ -310,14 +361,18 @@ async function main() {
   console.log();
 
   console.log("--- BuyRouter + Liquidity wrapper ---");
-  const buyRouter = await viem.deployContract("TCGVaultBuyRouter", [
-    PANCAKE_ROUTER_TESTNET,
-    usdcAddress,
-    tokenAddress,
-    vaultAddr,
-    marketingAddr,
-    communityAddr,
-  ], { client: { wallet: deployer } });
+  const buyRouter = await deployTracked(
+    "TCGVaultBuyRouter",
+    [
+      PANCAKE_ROUTER_TESTNET,
+      usdcAddress,
+      tokenAddress,
+      vaultAddr,
+      marketingAddr,
+      communityAddr,
+    ],
+    { client: { wallet: deployer } },
+  );
   const buyRouterAddress = buyRouter.address as Address;
   console.log("TCGVaultBuyRouter:", buyRouterAddress);
   verifyJobs.push({
@@ -337,7 +392,7 @@ async function main() {
   await publicClient.waitForTransactionReceipt({ hash: h });
   console.log("token.setBuyRouter ✓");
 
-  const wrapper = await viem.deployContract(
+  const wrapper = await deployTracked(
     "contracts/TCGVaultLiquidityWrapper.sol:TCGVaultLiquidityWrapper",
     [tokenAddress, PANCAKE_ROUTER_TESTNET],
     { client: { wallet: deployer } },
@@ -360,7 +415,7 @@ async function main() {
   let converterAddress: Address | undefined;
   if (process.env.SKIP_TCGR !== "1") {
     console.log("--- TCGR + converter (1:1) ---");
-    const tcgr = await viem.deployContract("TCGRToken", [buyRouterAddress], { client: { wallet: deployer } });
+    const tcgr = await deployTracked("TCGRToken", [buyRouterAddress], { client: { wallet: deployer } });
     tcgrAddress = tcgr.address as Address;
     nonce += 1n;
     verifyJobs.push({
@@ -372,11 +427,11 @@ async function main() {
     h = await buyRouter.write.setReferralToken([tcgrAddress], { account: deployer.account });
     await publicClient.waitForTransactionReceipt({ hash: h });
 
-    const converter = await viem.deployContract("TCGRToTCGVConverter", [
-      tcgrAddress,
-      tokenAddress,
-      parseEther("1"),
-    ], { client: { wallet: deployer } });
+    const converter = await deployTracked(
+      "TCGRToTCGVConverter",
+      [tcgrAddress, tokenAddress, parseEther("1")],
+      { client: { wallet: deployer } },
+    );
     converterAddress = converter.address as Address;
     nonce += 1n;
     verifyJobs.push({
@@ -391,6 +446,9 @@ async function main() {
     console.log("TCGRToTCGVConverter:", converterAddress, "(fund converter with TCGV before convert)");
     console.log();
   }
+
+  const startBlock = Number(deploymentBlocks.reduce((a, b) => (a < b ? a : b)));
+  const lowerAddr = (a: Address) => a.toLowerCase() as Address;
 
   const out = {
     chainId: Number(CHAIN_ID_BSC_TESTNET),
@@ -413,6 +471,24 @@ async function main() {
     treasury: treasuryAddr,
     tcgr: tcgrAddress ?? null,
     tcgrConverter: converterAddress ?? null,
+    startBlock,
+  };
+
+  const deployJsonForSubgraph = {
+    chainId: Number(CHAIN_ID_BSC_TESTNET),
+    startBlock,
+    skipTcgr: process.env.SKIP_TCGR === "1",
+    addresses: {
+      tcgv: lowerAddr(tokenAddress),
+      nexus: lowerAddr(nexusTokenAddress),
+      buyRouter: lowerAddr(buyRouterAddress),
+      stakingVault: lowerAddr(stakingVaultAddress),
+      basicNFT: lowerAddr(basicNFTAddress),
+      founderNFT: lowerAddr(founderNFTAddress),
+      initialLaunch: lowerAddr(initialLaunchAddress),
+      tcgr: tcgrAddress ? lowerAddr(tcgrAddress) : null,
+      tcgrConverter: converterAddress ? lowerAddr(converterAddress) : null,
+    },
   };
 
   console.log("=".repeat(72));
@@ -420,6 +496,19 @@ async function main() {
   console.log("=".repeat(72));
   console.log(JSON.stringify(out, null, 2));
   console.log();
+
+  if (process.env.SKIP_SUBGRAPH_SYNC === "1") {
+    console.log("SKIP_SUBGRAPH_SYNC=1 — skipping subgraph ABI sync + Turbo pipeline.");
+  } else if (process.env.SKIP_TCGR === "1") {
+    console.log(
+      "SKIP_TCGR=1 — skipping subgraph sync (manifest requires TCGR + converter addresses).",
+    );
+  } else {
+    mkdirSync(join(CONTRACTS_ROOT, ".cache"), { recursive: true });
+    writeFileSync(SUBGRAPH_DEPLOY_CACHE, `${JSON.stringify(deployJsonForSubgraph, null, 2)}\n`, "utf8");
+    runSubgraphSyncAfterDeploy(SUBGRAPH_DEPLOY_CACHE);
+  }
+
   await runQueuedVerifications(verifyJobs);
   console.log();
   console.log("Next steps:");
