@@ -9,8 +9,8 @@
  * 1. TCGVaultStakingVault(TCGV)
  * 2. TCGVaultBasicNFT(stakingVault)
  * 3. setMinStakeForBasicNFT, setBasicNFTContract on vault
- * 4. TCGVaultFounderNFT(usdc, nexusToken, treasury)
- * 5. TCGVaultInitialLaunch(tcgv, usdc, founderNFT, nexusToken, treasury)
+ * 4. TCGVaultFounderNFT(usdc, nexusToken, vaultAcquisitions, liquidity, ops) — env: VAULT_ADDRESS, LIQUIDITY_RECIPIENT, OPS_RECIPIENT (fallback: deployer)
+ * 5. TCGVaultInitialLaunch(tcgv, usdc, founderNFT, nexusToken, treasury) — env: TREASURY_ADDRESS (fallback: deployer)
  * 6. nexus.setPresaleMinter(founderNFT), nexus.setPresaleMinter(initialLaunch)
  * 7. Transfer 600M TCGV (60% of supply) to InitialLaunch for presale vesting claims
  *
@@ -28,6 +28,9 @@ async function main() {
   const usdcAddress = (process.env.USDC_ADDRESS || process.env.STABLECOIN_ADDRESS) as `0x${string}`;
   const nexusAddress = process.env.NEXUS_ADDRESS as `0x${string}`;
   const treasury = (process.env.TREASURY_ADDRESS || deployer.account.address) as `0x${string}`;
+  const founderVaultAcquisitions = (process.env.VAULT_ADDRESS || deployer.account.address) as `0x${string}`;
+  const founderLiquidity = (process.env.LIQUIDITY_RECIPIENT || deployer.account.address) as `0x${string}`;
+  const founderOps = (process.env.OPS_RECIPIENT || deployer.account.address) as `0x${string}`;
 
   if (!tcgvAddress || !usdcAddress || !nexusAddress) {
     throw new Error("Set TCGV_ADDRESS, USDC_ADDRESS, and NEXUS_ADDRESS");
@@ -37,7 +40,8 @@ async function main() {
   console.log("TCGV:", tcgvAddress);
   console.log("USDC:", usdcAddress);
   console.log("NEXUS:", nexusAddress);
-  console.log("Treasury:", treasury);
+  console.log("InitialLaunch treasury (USDC):", treasury);
+  console.log("Founder NFT USDC recipients (30/60/10 %):", founderVaultAcquisitions, founderLiquidity, founderOps);
 
   const vault = await viem.deployContract("TCGVaultStakingVault", [tcgvAddress], { client: { wallet: deployer } });
   console.log("TCGVaultStakingVault:", vault.address);
@@ -50,7 +54,11 @@ async function main() {
   await vault.write.setBasicNFTContract([basicNFT.address], { account: deployer.account });
   console.log("Min stake for Basic NFT set (5000 TCGV)");
 
-  const founderNFT = await viem.deployContract("TCGVaultFounderNFT", [usdcAddress, nexusAddress, treasury], { client: { wallet: deployer } });
+  const founderNFT = await viem.deployContract(
+    "TCGVaultFounderNFT",
+    [usdcAddress, nexusAddress, founderVaultAcquisitions, founderLiquidity, founderOps],
+    { client: { wallet: deployer } },
+  );
   console.log("TCGVaultFounderNFT:", founderNFT.address);
 
   const initialLaunch = await viem.deployContract("TCGVaultInitialLaunch", [

@@ -4,7 +4,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import hre from "hardhat";
-import { parseEther, parseUnits, getContractAddress, zeroAddress } from "viem";
+import { parseEther, parseUnits, getContractAddress } from "viem";
 
 const { viem, networkHelpers } = await hre.network.connect();
 
@@ -93,7 +93,7 @@ describe("TCGVaultBuyRouter", function () {
     await usdc.write.mint([buyer.account.address, usdcIn], { account: owner.account });
     await usdc.write.approve([buyRouter.address, usdcIn], { account: buyer.account });
 
-    const hash = await buyRouter.write.buyTCGVWithUSDC([usdcIn, 0n, BigInt(Math.floor(Date.now() / 1000) + 300), zeroAddress], {
+    const hash = await buyRouter.write.buyTCGVWithUSDC([usdcIn, 0n, BigInt(Math.floor(Date.now() / 1000) + 300)], {
       account: buyer.account,
     });
     const publicClient = await viem.getPublicClient();
@@ -118,7 +118,7 @@ describe("TCGVaultBuyRouter", function () {
     assert.ok(userNexusAfter > userNexusBefore);
   });
 
-  it("buyTCGVWithUSDC mints 0.5% TCGR to referrer when referral token is set", async function () {
+  it("buyTCGVWithUSDC mints 0.5% TCGR to registered referrer when referral token is set", async function () {
     const { owner, user1, tcgv, buyRouter, usdc } = await networkHelpers.loadFixture(deployFixture);
     const tcgr = await viem.deployContract("TCGRToken", [buyRouter.address], { client: { wallet: owner } });
     await buyRouter.write.setReferralToken([tcgr.address], { account: owner.account });
@@ -128,10 +128,11 @@ describe("TCGVaultBuyRouter", function () {
     const usdcIn = parseUnits("1000", 6);
     const expectedReferral = (usdcIn * 10n ** 12n * 50n) / 10000n; // 0.5%, scaled to 18 decimals
 
+    await tcgr.write.setReferrer([referrer.account.address], { account: buyer.account });
     const tcgrBefore = await tcgr.read.balanceOf([referrer.account.address]);
     await usdc.write.mint([buyer.account.address, usdcIn], { account: owner.account });
     await usdc.write.approve([buyRouter.address, usdcIn], { account: buyer.account });
-    await buyRouter.write.buyTCGVWithUSDC([usdcIn, 0n, BigInt(Math.floor(Date.now() / 1000) + 300), referrer.account.address], {
+    await buyRouter.write.buyTCGVWithUSDC([usdcIn, 0n, BigInt(Math.floor(Date.now() / 1000) + 300)], {
       account: buyer.account,
     });
     const tcgrAfter = await tcgr.read.balanceOf([referrer.account.address]);
@@ -141,7 +142,7 @@ describe("TCGVaultBuyRouter", function () {
   it("buyTCGVWithUSDC reverts with zero USDC", async function () {
     const { user1, buyRouter } = await networkHelpers.loadFixture(deployFixture);
     await viem.assertions.revertWithCustomError(
-      buyRouter.write.buyTCGVWithUSDC([0n, 0n, BigInt(Math.floor(Date.now() / 1000) + 300), zeroAddress], { account: user1.account }),
+      buyRouter.write.buyTCGVWithUSDC([0n, 0n, BigInt(Math.floor(Date.now() / 1000) + 300)], { account: user1.account }),
       buyRouter,
       "ZeroUSDC"
     );
@@ -154,7 +155,7 @@ describe("TCGVaultBuyRouter", function () {
         const usdcIn = parseUnits("100", 6);
         await usdc.write.mint([user1.account.address, usdcIn], { account: user1.account });
         await usdc.write.approve([buyRouter.address, usdcIn], { account: user1.account });
-        return buyRouter.write.buyTCGVWithUSDC([usdcIn, 0n, 1n, zeroAddress], { account: user1.account });
+        return buyRouter.write.buyTCGVWithUSDC([usdcIn, 0n, 1n], { account: user1.account });
       })(),
       buyRouter,
       "Expired"
@@ -207,7 +208,7 @@ describe("TCGVaultBuyRouter", function () {
       (async () => {
         await usdc.write.mint([owner.account.address, usdcIn], { account: owner.account });
         await usdc.write.approve([buyRouter.address, usdcIn], { account: owner.account });
-        return buyRouter.write.buyTCGVWithUSDC([usdcIn, impossibleMin, BigInt(Math.floor(Date.now() / 1000) + 300), zeroAddress], {
+        return buyRouter.write.buyTCGVWithUSDC([usdcIn, impossibleMin, BigInt(Math.floor(Date.now() / 1000) + 300)], {
           account: owner.account,
         });
       })(),
@@ -308,7 +309,7 @@ describe("TCGVaultBuyRouter", function () {
     await usdc.write.mint([owner.account.address, usdcIn], { account: owner.account });
     await usdc.write.approve([buyRouter.address, usdcIn], { account: owner.account });
     const communityBefore = await usdc.read.balanceOf([community.account.address]);
-    await buyRouter.write.buyTCGVWithUSDC([usdcIn, 0n, BigInt(Math.floor(Date.now() / 1000) + 300), zeroAddress], { account: owner.account });
+    await buyRouter.write.buyTCGVWithUSDC([usdcIn, 0n, BigInt(Math.floor(Date.now() / 1000) + 300)], { account: owner.account });
     const communityAfter = await usdc.read.balanceOf([community.account.address]);
     assert.ok(communityAfter > communityBefore);
   });
@@ -329,7 +330,7 @@ describe("TCGVaultBuyRouter", function () {
     assert.ok(vAfter >= vBefore && mAfter >= mBefore && cAfter >= cBefore);
   });
 
-  it("_handleReferral skips mint when referrer is buyer (referrer == buyer)", async function () {
+  it("buy without setReferrer on TCGR does not mint TCGR", async function () {
     const { owner, user1, buyRouter, usdc } = await networkHelpers.loadFixture(deployFixture);
     const tcgr = await viem.deployContract("TCGRToken", [buyRouter.address], { client: { wallet: owner } });
     await buyRouter.write.setReferralToken([tcgr.address], { account: owner.account });
@@ -337,8 +338,19 @@ describe("TCGVaultBuyRouter", function () {
     await usdc.write.mint([user1.account.address, usdcIn], { account: owner.account });
     await usdc.write.approve([buyRouter.address, usdcIn], { account: user1.account });
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
-    await buyRouter.write.buyTCGVWithUSDC([usdcIn, 0n, deadline, user1.account.address], { account: user1.account });
+    await buyRouter.write.buyTCGVWithUSDC([usdcIn, 0n, deadline], { account: user1.account });
+    assert.strictEqual(await tcgr.read.balanceOf([owner.account.address]), 0n);
     assert.strictEqual(await tcgr.read.balanceOf([user1.account.address]), 0n);
+  });
+
+  it("TCGR setReferrer to self reverts (SelfReferralNotAllowed)", async function () {
+    const { owner } = await networkHelpers.loadFixture(deployFixture);
+    const tcgr = await viem.deployContract("TCGRToken", [owner.account.address], { client: { wallet: owner } });
+    await viem.assertions.revertWithCustomError(
+      tcgr.write.setReferrer([owner.account.address], { account: owner.account }),
+      tcgr,
+      "SelfReferralNotAllowed"
+    );
   });
   it("constructor reverts with ZeroAddress when vault, marketing, or community is zero", async function () {
     const { owner, routerAddress, usdcAddress, tcgvAddress, vault, marketing, community } = await networkHelpers.loadFixture(deployFixture);

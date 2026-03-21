@@ -12,13 +12,15 @@
  * Prerequisites (Hardhat 3 keystore / env per hardhat.config.ts):
  *   - Network `bsctest` with BSCTEST_RPC_URL and TCG_KEY configured.
  *
- * Optional env:
- *   - VAULT_ADDRESS, MARKETING_ADDRESS, COMMUNITY_ADDRESS — required fee recipients
- *   - TREASURY_ADDRESS — Founder NFT + InitialLaunch USDC treasury (required)
- *   - LIQUIDITY_RECIPIENT, TEAM_RECIPIENT, OPS_RECIPIENT — required post-presale split recipients
+ * Optional env (see contracts/docs/WALLET_ADDRESSES.md — FR/EN labels vs .env):
+ *   - VAULT_ADDRESS (community vault USDC), MARKETING_ADDRESS, COMMUNITY_ADDRESS — fee recipients
+ *   - TREASURY_ADDRESS — InitialLaunch USDC treasury only (required)
+ *   - LIQUIDITY_RECIPIENT, OPS_RECIPIENT — also used for Founder NFT mint USDC split (60% / 10%) with VAULT_ADDRESS (30%)
+ *   - TEAM_RECIPIENT — post-presale token allocation recipient (with LIQUIDITY_RECIPIENT, OPS_RECIPIENT)
  *   - USDC_ADDRESS — skip MockUSDC deploy and use this 6-decimal stablecoin
  *   - SKIP_TCGR=1 — do not deploy TCGR + converter
  *   - MOCK_USDC_MINT_DEPLOYER=0 — when deploying MockUSDC, skip minting 1M USDC to deployer
+ *   - BASIC_NFT_MIN_STAKE — min stake as **decimal TCGV string** (e.g. `5000`); parsed with `parseEther` (default: `5000`)
  *
  * Usage:
  *   yarn deploy:bsctest
@@ -129,7 +131,7 @@ async function main() {
   console.log("Vault (fees): ", vaultAddr);
   console.log("Marketing:    ", marketingAddr);
   console.log("Community:    ", communityAddr);
-  console.log("Treasury:     ", treasuryAddr, "(Founder NFT + InitialLaunch USDC sink)");
+  console.log("Treasury:     ", treasuryAddr, "(InitialLaunch USDC only; Founder NFT → vault/liquidity/ops)");
   console.log("Pancake factory (ref):", PANCAKE_FACTORY_TESTNET);
   console.log("Pancake router:       ", PANCAKE_ROUTER_TESTNET);
   console.log();
@@ -205,14 +207,20 @@ async function main() {
     contract: "contracts/TCGVaultToken.sol:TCGVaultToken",
   });
 
-  await viem.deployContract("TCGVaultFounderNFT", [usdcAddress, nexusTokenAddress, treasuryAddr], {
+  await viem.deployContract("TCGVaultFounderNFT", [
+    usdcAddress,
+    nexusTokenAddress,
+    vaultAddr,
+    liquidityRecipient,
+    opsRecipient,
+  ], {
     client: { wallet: deployer },
   });
   nonce += 1n;
   console.log("TCGVaultFounderNFT:", founderNFTAddress);
   verifyJobs.push({
     address: founderNFTAddress,
-    constructorArguments: [usdcAddress, nexusTokenAddress, treasuryAddr],
+    constructorArguments: [usdcAddress, nexusTokenAddress, vaultAddr, liquidityRecipient, opsRecipient],
     contract: "contracts/TCGVaultFounderNFT.sol:TCGVaultFounderNFT",
   });
 
@@ -257,6 +265,48 @@ async function main() {
   h = await nexusToken.write.setPresaleMinter([initialLaunchAddress, true], { account: deployer.account });
   await publicClient.waitForTransactionReceipt({ hash: h });
   console.log("Nexus presale minters: FounderNFT + InitialLaunch");
+  console.log();
+
+  console.log("--- Staking vault + Basic NFT (ERC-4626 + soulbound gate) ---");
+  const stakingVault = await viem.deployContract("TCGVaultStakingVault", [tokenAddress], {
+    client: { wallet: deployer },
+  });
+  const stakingVaultAddress = stakingVault.address as Address;
+  console.log("TCGVaultStakingVault:", stakingVaultAddress);
+  verifyJobs.push({
+    address: stakingVaultAddress,
+    constructorArguments: [tokenAddress],
+    contract: "contracts/TCGVaultStakingVault.sol:TCGVaultStakingVault",
+  });
+
+  const basicNFT = await viem.deployContract("TCGVaultBasicNFT", [stakingVaultAddress], {
+    client: { wallet: deployer },
+  });
+  const basicNFTAddress = basicNFT.address as Address;
+  console.log("TCGVaultBasicNFT:", basicNFTAddress);
+  verifyJobs.push({
+    address: basicNFTAddress,
+    constructorArguments: [stakingVaultAddress],
+    contract: "contracts/TCGVaultBasicNFT.sol:TCGVaultBasicNFT",
+  });
+
+  const minStakeForBasic = process.env.BASIC_NFT_MIN_STAKE?.trim()
+    ? parseEther(process.env.BASIC_NFT_MIN_STAKE.trim())
+    : parseEther("5000");
+  const stakingVaultContract = await viem.getContractAt("TCGVaultStakingVault", stakingVaultAddress);
+  h = await stakingVaultContract.write.setMinStakeForBasicNFT([minStakeForBasic], { account: deployer.account });
+  await publicClient.waitForTransactionReceipt({ hash: h });
+  h = await stakingVaultContract.write.setBasicNFTContract([basicNFTAddress], { account: deployer.account });
+  await publicClient.waitForTransactionReceipt({ hash: h });
+  console.log(
+    "stakingVault.setMinStakeForBasicNFT / setBasicNFTContract ✓ (min shares:",
+    minStakeForBasic.toString(),
+    ")",
+  );
+
+  h = await token.write.setExcludedFromFees([stakingVaultAddress, true], { account: deployer.account });
+  await publicClient.waitForTransactionReceipt({ hash: h });
+  console.log("token.setExcludedFromFees(stakingVault) ✓ (deposits are full-amount)");
   console.log();
 
   console.log("--- BuyRouter + Liquidity wrapper ---");
@@ -352,6 +402,9 @@ async function main() {
     nexus: nexusTokenAddress,
     founderNFT: founderNFTAddress,
     initialLaunch: initialLaunchAddress,
+    stakingVault: stakingVaultAddress,
+    basicNFT: basicNFTAddress,
+    basicNftMinStakeWei: minStakeForBasic.toString(),
     buyRouter: buyRouterAddress,
     liquidityWrapper: wrapperAddress,
     vault: vaultAddr,

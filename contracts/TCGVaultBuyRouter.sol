@@ -30,13 +30,11 @@ error ZeroAddress();
 /**
  * @title TCGVaultBuyRouter
  * @notice Buy and sell TCGV against USDC (stablecoin). Buy: USDC fee 13% (10% vault, 3% marketing), then swap remaining USDC for TCGV; 2% of TCGV burned. User receives rest + NEXUS cashback (30% presale, 10% standard — whitepaper §6).
- *         Referral: 0,5 % en $TCGR au profit du parrain (achats via routeur uniquement, CGU).
+ *         Referral: TCGR enregistre le parrain une fois par filleul; chaque achat validé via ce routeur appelle TCGR.processValidatedBuy (0,5 % au parrain, whitepaper).
  * @dev This contract is excluded from fees in TCGVaultToken. Cashback rate is determined by TCGVaultToken (presaleActive).
  *      Uses {ReentrancyGuardTransient} (EIP-1153) for buy/sell entrypoints; requires a chain that supports transient storage.
  */
 contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
-    /// @notice 0.5% of USDC value (scaled to 18 decimals) minted as TCGR to referrer for each validated buy.
-    uint256 public constant REFERRAL_BP = 50;
     /// @notice Hard cap for configurable buy/sell tax rates (25%).
     uint256 public constant MAX_FEE_BP = 2500;
 
@@ -64,7 +62,7 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
     address private immutable _community;
     ITCGRToken private _referralToken;
 
-    event BuyWithUSDC(address buyer, address referrer, uint256 usdcIn, uint256 feeUSDC, uint256 tcgvOut);
+    event BuyWithUSDC(address indexed buyer, uint256 usdcIn, uint256 feeUSDC, uint256 tcgvOut);
     event ReferralTokenSet(address token);
     event SellTCGVForUSDC(address seller, uint256 tcgvIn, uint256 feeTCGV, uint256 usdcOut);
     event BuyFeeParamsUpdated(uint256 vaultBp, uint256 marketingBp, uint256 communityBp, uint256 tcgvBurnBp);
@@ -238,21 +236,20 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
 
     /**
      * @notice Buy TCGV with USDC. 13% USDC fee to vault (10%) + marketing (3%); rest swapped for TCGV. 2% of TCGV received is burned. You get rest + NEXUS cashback.
-     *         If referrer is set (and not self), 0.5% of USDC value is minted as TCGR to the referrer (routeur uniquement, CGU).
+     *         If TCGR is set, notifies TCGR of this validated buy so the buyer's registered referrer may receive 0.5% TCGR (whitepaper).
      * @param usdcAmount Amount of USDC to spend (must be approved to this router).
      * @param amountOutMin Minimum TCGV to receive.
      * @param deadline Swap deadline.
-     * @param referrer Parrain (ambassadeur) — receives 0.5% in TCGR; pass address(0) if none.
      */
-    function buyTCGVWithUSDC(uint256 usdcAmount, uint256 amountOutMin, uint256 deadline, address referrer) external nonReentrant {
+    function buyTCGVWithUSDC(uint256 usdcAmount, uint256 amountOutMin, uint256 deadline) external nonReentrant {
         if (usdcAmount == 0) revert ZeroUSDC();
         if (deadline < block.timestamp) revert Expired();
 
         (uint256 tcgvToUser, uint256 feeUSDC) = _buyWithUSDC(usdcAmount, amountOutMin);
 
-        _handleReferral(msg.sender, referrer, usdcAmount);
+        _notifyReferralRewards(msg.sender, usdcAmount);
 
-        emit BuyWithUSDC(msg.sender, referrer, usdcAmount, feeUSDC, tcgvToUser);
+        emit BuyWithUSDC(msg.sender, usdcAmount, feeUSDC, tcgvToUser);
     }
 
     /**
@@ -306,14 +303,11 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
     }
 
     /**
-     * @notice Handle referral minting (0.5% of USDC value, scaled to 18 decimals).
+     * @notice TCGR resolves buyer => referrer and mints 0.5% if a durable link was set at registration.
      */
-    function _handleReferral(address buyer, address referrer, uint256 usdcAmount) private {
-        if (referrer == address(0) || referrer == buyer || address(_referralToken) == address(0)) return;
-        // usdcAmount has 6 decimals; scale to 18 to match TCGR decimals. mintReferral(0) is a no-op.
-        uint256 referralAmount = (usdcAmount * 1e12 * REFERRAL_BP) / 10000;
-        if (referralAmount == 0) return;
-        _referralToken.mintReferral(referrer, referralAmount);
+    function _notifyReferralRewards(address buyer, uint256 usdcAmount) private {
+        if (address(_referralToken) == address(0)) return;
+        _referralToken.processValidatedBuy(buyer, usdcAmount);
     }
 
     /**

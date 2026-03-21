@@ -23,6 +23,8 @@ async function expectRevert(promise: Promise<unknown>) {
 describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
   let owner: Awaited<ReturnType<typeof viem.getWalletClients>>[0];
   let user1: Awaited<ReturnType<typeof viem.getWalletClients>>[0];
+  let user2: Awaited<ReturnType<typeof viem.getWalletClients>>[0];
+  let buyer: Awaited<ReturnType<typeof viem.getWalletClients>>[0];
   let usdc: ContractReturnType<"MockWETH">;
   let nexus: ContractReturnType<"TCGNexusToken">;
   let founderNFT: ContractReturnType<"TCGVaultFounderNFT">;
@@ -61,12 +63,13 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
   }
 
   before(async () => {
-    [owner, user1] = await viem.getWalletClients();
+    [owner, user1, user2, buyer] = await viem.getWalletClients();
 
     const mockUsdc = await viem.deployContract("MockWETH", [], { client: { wallet: owner } });
     usdc = await viem.getContractAt("MockWETH", mockUsdc.address);
     await usdc.write.deposit({ value: parseEther("100"), account: owner.account });
     await usdc.write.transfer([user1.account.address, parseEther("50")], { account: owner.account });
+    await usdc.write.transfer([buyer.account.address, parseEther("10")], { account: owner.account });
 
     const mockTcgv = await viem.deployContract("contracts/test/MockTCGVPresale.sol:MockTCGVPresale", [], { client: { wallet: owner } });
     tcgv = await viem.getContractAt("MockTCGVPresale", mockTcgv.address);
@@ -76,6 +79,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
     founderNFT = await viem.deployContract("TCGVaultFounderNFT", [
       usdc.address,
       nexus.address,
+      user1.account.address,
+      user2.account.address,
       owner.account.address,
     ], { client: { wallet: owner } });
     initialLaunch = await viem.deployContract("TCGVaultInitialLaunch", [
@@ -95,12 +100,19 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
     it("Founder NFT getters return correct values", async () => {
       expect(getAddress((await founderNFT.read.usdc()) as `0x${string}`)).to.equal(getAddress(usdc.address));
       expect(getAddress((await founderNFT.read.nexusToken()) as `0x${string}`)).to.equal(getAddress(nexus.address));
-      expect(await founderNFT.read.nextTokenId()).to.be.a("bigint");
+      expect(await founderNFT.read.soldCount()).to.equal(0n);
       expect(await founderNFT.read.wave2StartTimestamp()).to.equal(0n);
-      expect(getAddress((await founderNFT.read.treasury()) as `0x${string}`)).to.equal(getAddress(owner.account.address));
+      expect(getAddress((await founderNFT.read.vaultAcquisitionsRecipient()) as `0x${string}`)).to.equal(
+        getAddress(user1.account.address),
+      );
+      expect(getAddress((await founderNFT.read.liquidityRecipient()) as `0x${string}`)).to.equal(
+        getAddress(user2.account.address),
+      );
+      expect(getAddress((await founderNFT.read.opsRecipient()) as `0x${string}`)).to.equal(
+        getAddress(owner.account.address),
+      );
       expect(await founderNFT.read.ownerWave1Mints()).to.equal(0n);
       expect(await founderNFT.read.ownerWave2Mints()).to.equal(0n);
-      expect(await founderNFT.read.soldCount()).to.equal(await founderNFT.read.nextTokenId());
       expect(await founderNFT.read.currentWave()).to.equal(1n);
       expect(await founderNFT.read.currentPrice()).to.equal(BigInt(WAVE1_PRICE));
     });
@@ -112,6 +124,22 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const expectedNexus = (BigInt(WAVE1_PRICE) * 3000n * (10n ** 18n)) / (10000n * (10n ** 6n));
       expect(nexusAfter - nexusBefore).to.equal(expectedNexus);
       expect(await founderNFT.read.currentWave()).to.equal(1n);
+    });
+
+    it("wave 1: mint splits USDC 30% / 60% / 10% to recipients", async () => {
+      const price = BigInt(WAVE1_PRICE);
+      const toVault = (price * 3000n) / 10000n;
+      const toLiq = (price * 6000n) / 10000n;
+      const toOps = price - toVault - toLiq;
+      const bVaultBefore = await usdc.read.balanceOf([user1.account.address]);
+      const bLiqBefore = await usdc.read.balanceOf([user2.account.address]);
+      const bOpsBefore = await usdc.read.balanceOf([owner.account.address]);
+      // Minter must not be a recipient, or balance deltas conflate pay + receive.
+      await usdc.write.approve([founderNFT.address, price], { account: buyer.account });
+      await founderNFT.write.mint({ account: buyer.account });
+      expect((await usdc.read.balanceOf([user1.account.address])) - bVaultBefore).to.equal(toVault);
+      expect((await usdc.read.balanceOf([user2.account.address])) - bLiqBefore).to.equal(toLiq);
+      expect((await usdc.read.balanceOf([owner.account.address])) - bOpsBefore).to.equal(toOps);
     });
 
     it(
@@ -133,14 +161,28 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       expect(uri).to.equal("https://api.tcg-vault.io/founder/0");
     });
 
-    it("owner can setTreasury", async () => {
-      await founderNFT.write.setTreasury([user1.account.address], { account: owner.account });
-      expect(getAddress((await founderNFT.read.treasury()) as `0x${string}`)).to.equal(getAddress(user1.account.address));
+    it("owner can setUsdcRecipients", async () => {
+      await founderNFT.write.setUsdcRecipients(
+        [user2.account.address, owner.account.address, user1.account.address],
+        { account: owner.account },
+      );
+      expect(getAddress((await founderNFT.read.vaultAcquisitionsRecipient()) as `0x${string}`)).to.equal(
+        getAddress(user2.account.address),
+      );
+      expect(getAddress((await founderNFT.read.liquidityRecipient()) as `0x${string}`)).to.equal(
+        getAddress(owner.account.address),
+      );
+      expect(getAddress((await founderNFT.read.opsRecipient()) as `0x${string}`)).to.equal(
+        getAddress(user1.account.address),
+      );
     });
 
-    it("setTreasury reverts when not owner", async () => {
+    it("setUsdcRecipients reverts when not owner", async () => {
       await expectRevert(
-        founderNFT.write.setTreasury([user1.account.address], { account: user1.account })
+        founderNFT.write.setUsdcRecipients(
+          [user1.account.address, user2.account.address, owner.account.address],
+          { account: user1.account },
+        ),
       );
     });
 
@@ -149,24 +191,31 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
         viem.deployContract("TCGVaultFounderNFT", [
           usdc.address,
           "0x0000000000000000000000000000000000000000",
+          user1.account.address,
+          user2.account.address,
           owner.account.address,
         ], { client: { wallet: owner } })
       );
     });
 
-    it("constructor reverts when treasury is zero", async () => {
+    it("constructor reverts when vault acquisitions recipient is zero", async () => {
       await expectRevert(
         viem.deployContract("TCGVaultFounderNFT", [
           usdc.address,
           nexus.address,
           "0x0000000000000000000000000000000000000000",
+          user2.account.address,
+          owner.account.address,
         ], { client: { wallet: owner } })
       );
     });
 
-    it("setTreasury reverts when treasury is zero", async () => {
+    it("setUsdcRecipients reverts when any recipient is zero", async () => {
       await viem.assertions.revertWithCustomError(
-        founderNFT.write.setTreasury(["0x0000000000000000000000000000000000000000"], { account: owner.account }),
+        founderNFT.write.setUsdcRecipients(
+          ["0x0000000000000000000000000000000000000000", user2.account.address, owner.account.address],
+          { account: owner.account },
+        ),
         founderNFT,
         "ZeroAddress"
       );
@@ -182,6 +231,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
         usdc.address,
         nexus.address,
+        user1.account.address,
+        user2.account.address,
         owner.account.address,
       ], { client: { wallet: owner } });
       await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
@@ -201,6 +252,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
         usdc.address,
         nexus.address,
+        user1.account.address,
+        user2.account.address,
         owner.account.address,
       ], { client: { wallet: owner } });
 
@@ -223,6 +276,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
         usdc.address,
         nexus.address,
+        user1.account.address,
+        user2.account.address,
         owner.account.address,
       ], { client: { wallet: owner } });
       await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
@@ -241,6 +296,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
         usdc.address,
         nexus.address,
+        user1.account.address,
+        user2.account.address,
         owner.account.address,
       ], { client: { wallet: owner } });
       await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
@@ -253,6 +310,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
         usdc.address,
         nexus.address,
+        user1.account.address,
+        user2.account.address,
         owner.account.address,
       ], { client: { wallet: owner } });
       await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
@@ -334,6 +393,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
         usdc.address,
         nexus.address,
+        user1.account.address,
+        user2.account.address,
         owner.account.address,
       ], { client: { wallet: owner } });
       await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
@@ -411,6 +472,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
         usdc.address,
         nexus.address,
+        user1.account.address,
+        user2.account.address,
         owner.account.address,
       ], { client: { wallet: owner } });
       await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
@@ -444,6 +507,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
         usdc.address,
         nexus.address,
+        user1.account.address,
+        user2.account.address,
         owner.account.address,
       ], { client: { wallet: owner } });
       await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
@@ -480,6 +545,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
         usdc.address,
         nexus.address,
+        user1.account.address,
+        user2.account.address,
         owner.account.address,
       ], { client: { wallet: owner } });
       await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
@@ -517,6 +584,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
         usdc.address,
         nexus.address,
+        user1.account.address,
+        user2.account.address,
         owner.account.address,
       ], { client: { wallet: owner } });
       await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
@@ -557,6 +626,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
         usdc.address,
         nexus.address,
+        user1.account.address,
+        user2.account.address,
         owner.account.address,
       ], { client: { wallet: owner } });
       await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
@@ -589,6 +660,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
         usdc.address,
         nexus.address,
+        user1.account.address,
+        user2.account.address,
         owner.account.address,
       ], { client: { wallet: owner } });
       const launchNoWave2 = await viem.deployContract("TCGVaultInitialLaunch", [
@@ -632,6 +705,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
         usdc.address,
         nexus.address,
+        user1.account.address,
+        user2.account.address,
         owner.account.address,
       ], { client: { wallet: owner } });
       await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });

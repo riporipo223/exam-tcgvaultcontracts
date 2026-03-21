@@ -403,7 +403,7 @@ async function main() {
       address: buyRouterAddress,
       abi: buyRouter.abi,
       functionName: "buyTCGVWithUSDC",
-      args: [buyRouterUSDC, 0n, deadline, zeroAddress],
+      args: [buyRouterUSDC, 0n, deadline],
       account: trader.account,
     });
   } catch (simErr: any) {
@@ -419,7 +419,7 @@ async function main() {
 
   let buyRouterTxHash: `0x${string}`;
   try {
-    buyRouterTxHash = await buyRouter.write.buyTCGVWithUSDC([buyRouterUSDC, 0n, deadline, zeroAddress], {
+    buyRouterTxHash = await buyRouter.write.buyTCGVWithUSDC([buyRouterUSDC, 0n, deadline], {
       account: trader.account,
     });
   } catch (err: any) {
@@ -433,7 +433,7 @@ async function main() {
         address: buyRouterAddress,
         abi: buyRouter.abi,
         functionName: "buyTCGVWithUSDC",
-        args: [buyRouterUSDC, 0n, deadline, zeroAddress],
+        args: [buyRouterUSDC, 0n, deadline],
         account: trader.account,
       });
     } catch (simErr2: any) {

@@ -236,9 +236,13 @@ async function main() {
   const vaultReceiver = await viem.deployContract("FeeReceiver", [], { client: { wallet: deployer } });
   const marketingReceiver = await viem.deployContract("FeeReceiver", [], { client: { wallet: deployer } });
   const communityReceiver = await viem.deployContract("FeeReceiver", [], { client: { wallet: deployer } });
+  const liquidityReceiver = await viem.deployContract("FeeReceiver", [], { client: { wallet: deployer } });
+  const opsReceiver = await viem.deployContract("FeeReceiver", [], { client: { wallet: deployer } });
   const vaultAddr = vaultReceiver.address as Address;
   const marketingAddr = marketingReceiver.address as Address;
   const communityAddr = communityReceiver.address as Address;
+  const liquidityAddr = liquidityReceiver.address as Address;
+  const opsAddr = opsReceiver.address as Address;
 
   const publicClient = await viem.getPublicClient();
 
@@ -281,7 +285,7 @@ async function main() {
   ], { client: { wallet: deployer } });
   nonce += 1n;
 
-  await viem.deployContract("TCGVaultFounderNFT", [BSC_USDC, nexusTokenAddress, vaultAddr], {
+  await viem.deployContract("TCGVaultFounderNFT", [BSC_USDC, nexusTokenAddress, vaultAddr, liquidityAddr, opsAddr], {
     client: { wallet: deployer },
   });
   nonce += 1n;
@@ -676,11 +680,12 @@ async function main() {
     const traderTcgvAfter = await token.read.balanceOf([trader.account.address]);
     console.log("After DEX buy (1000 USDC): trader TCGV", formatEther(traderTcgvAfter));
 
-    // --- Phase 7.1: Buy via BuyRouter (USDC) with referrer → TCGR to referrer ---
+    // --- Phase 7.1: Buy via BuyRouter (USDC); TCGR rewards parrain enregistré sur TCGR (whitepaper) ---
     const buyUsdcAmount = 500n * 10n ** BigInt(USDC_DECIMALS);
+    await tcgr.write.setReferrer([deployer.account.address], { account: trader.account });
     await usdc.write.approve([buyRouter.address as Address, buyUsdcAmount], { account: trader.account });
     const referrerTcgrBefore = await tcgr.read.balanceOf([deployer.account.address]);
-    await buyRouter.write.buyTCGVWithUSDC([buyUsdcAmount, 0n, dexDeadline, deployer.account.address], {
+    await buyRouter.write.buyTCGVWithUSDC([buyUsdcAmount, 0n, dexDeadline], {
       account: trader.account,
     });
     const referrerTcgrAfter = await tcgr.read.balanceOf([deployer.account.address]);
