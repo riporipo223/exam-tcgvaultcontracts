@@ -566,6 +566,18 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     }
 
     /**
+     * @notice Burn presale allocations held by the presale contracts.
+     * @dev Used for MiCA cooling-off cancellations. Burns from `from`.
+     *      Access: only `presaleFinalizer`.
+     */
+    function burnPresale(address from, uint256 amount) external {
+        if (msg.sender != presaleFinalizer) revert OnlyPresaleFinalizer();
+        if (from == address(0)) revert ZeroAddress();
+        if (amount == 0) return;
+        _burn(from, amount);
+    }
+
+    /**
      * @notice Override transfer to apply fees
      * @dev Detects buys (from pair) and sells (to pair). Liquidity helpers should be `isExcludedFromFees` and receive withdrawals before forwarding to users.
      */

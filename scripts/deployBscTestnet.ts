@@ -12,11 +12,14 @@
  * Prerequisites (Hardhat 3 keystore / env per hardhat.config.ts):
  *   - Network `bsctest` with BSCTEST_RPC_URL and TCG_KEY configured.
  *
- * Optional env (see contracts/docs/WALLET_ADDRESSES.md — FR/EN labels vs .env):
+ * Required env (see contracts/docs/WALLET_ADDRESSES.md — FR/EN labels vs .env):
  *   - VAULT_ADDRESS (community vault USDC), MARKETING_ADDRESS, COMMUNITY_ADDRESS — fee recipients
- *   - TREASURY_ADDRESS — InitialLaunch USDC treasury only (required)
- *   - LIQUIDITY_RECIPIENT, OPS_RECIPIENT — also used for Founder NFT mint USDC split (60% / 10%) with VAULT_ADDRESS (30%)
+ *   - CASP_USDC_ADDRESS — MiCA CASP sink for FounderNFT and InitialLaunch USDC flows (required)
+ *   - TREASURY_ADDRESS — InitialLaunch treasury alias (required)
+ *   - LIQUIDITY_RECIPIENT, OPS_RECIPIENT — post-presale allocation recipients
  *   - TEAM_RECIPIENT — post-presale token allocation recipient (with LIQUIDITY_RECIPIENT, OPS_RECIPIENT)
+ *
+ * Optional env:
  *   - USDC_ADDRESS — skip MockUSDC deploy and use this 6-decimal stablecoin
  *   - SKIP_TCGR=1 — do not deploy TCGR + converter
  *   - SKIP_SUBGRAPH_SYNC=1 — after deploy, skip `yarn update:subgraph:abis` + subgraph `yarn sync:pipeline`
@@ -154,6 +157,7 @@ async function main() {
   const vaultAddr = readRequiredAddress("VAULT_ADDRESS");
   const marketingAddr = readRequiredAddress("MARKETING_ADDRESS");
   const communityAddr = readRequiredAddress("COMMUNITY_ADDRESS");
+  const caspUsdcAddr = readRequiredAddress("CASP_USDC_ADDRESS");
   const treasuryAddr = readRequiredAddress("TREASURY_ADDRESS");
   const liquidityRecipient = readRequiredAddress("LIQUIDITY_RECIPIENT");
   const teamRecipient = readRequiredAddress("TEAM_RECIPIENT");
@@ -163,13 +167,14 @@ async function main() {
     !vaultAddr ||
     !marketingAddr ||
     !communityAddr ||
+    !caspUsdcAddr ||
     !treasuryAddr ||
     !liquidityRecipient ||
     !teamRecipient ||
     !opsRecipient
   ) {
     console.error(
-      "Missing one or more required address env vars: VAULT_ADDRESS, MARKETING_ADDRESS, COMMUNITY_ADDRESS, TREASURY_ADDRESS, LIQUIDITY_RECIPIENT, TEAM_RECIPIENT, OPS_RECIPIENT. Refusing to deploy.",
+      "Missing one or more required address env vars: VAULT_ADDRESS, MARKETING_ADDRESS, COMMUNITY_ADDRESS, CASP_USDC_ADDRESS, TREASURY_ADDRESS, LIQUIDITY_RECIPIENT, TEAM_RECIPIENT, OPS_RECIPIENT. Refusing to deploy.",
     );
     return;
   }
@@ -182,7 +187,8 @@ async function main() {
   console.log("Vault (fees): ", vaultAddr);
   console.log("Marketing:    ", marketingAddr);
   console.log("Community:    ", communityAddr);
-  console.log("Treasury:     ", treasuryAddr, "(InitialLaunch USDC only; Founder NFT → vault/liquidity/ops)");
+  console.log("CASP USDC:    ", caspUsdcAddr, "(Founder NFT + InitialLaunch USDC sink)");
+  console.log("Treasury:     ", treasuryAddr, "(InitialLaunch treasury)");
   console.log("Pancake factory (ref):", PANCAKE_FACTORY_TESTNET);
   console.log("Pancake router:       ", PANCAKE_ROUTER_TESTNET);
   console.log();
@@ -264,7 +270,7 @@ async function main() {
 
   await deployTracked(
     "TCGVaultFounderNFT",
-    [usdcAddress, nexusTokenAddress, vaultAddr, liquidityRecipient, opsRecipient],
+    [usdcAddress, nexusTokenAddress, caspUsdcAddr],
     {
       client: { wallet: deployer },
     },
@@ -273,7 +279,7 @@ async function main() {
   console.log("TCGVaultFounderNFT:", founderNFTAddress);
   verifyJobs.push({
     address: founderNFTAddress,
-    constructorArguments: [usdcAddress, nexusTokenAddress, vaultAddr, liquidityRecipient, opsRecipient],
+    constructorArguments: [usdcAddress, nexusTokenAddress, caspUsdcAddr],
     contract: "contracts/TCGVaultFounderNFT.sol:TCGVaultFounderNFT",
   });
 

@@ -285,7 +285,7 @@ async function main() {
   ], { client: { wallet: deployer } });
   nonce += 1n;
 
-  await viem.deployContract("TCGVaultFounderNFT", [BSC_USDC, nexusTokenAddress, vaultAddr, liquidityAddr, opsAddr], {
+  await viem.deployContract("TCGVaultFounderNFT", [BSC_USDC, nexusTokenAddress, vaultAddr], {
     client: { wallet: deployer },
   });
   nonce += 1n;
@@ -543,12 +543,12 @@ async function main() {
   console.log("--- Phase 5: Time travel 121h, set recipients, finalize ---");
   try {
     if (networkHelpers?.time) {
-      await networkHelpers.time.increase(PRESALE_COUNTDOWN_HOURS * 3600 + 3600);
+      await networkHelpers.time.increase(PRESALE_COUNTDOWN_HOURS * 3600 + 3600 + 20 * 24 * 3600);
       await networkHelpers.mine();
       console.log("Time increased by 121h and block mined.");
     } else {
       const rpc = publicClient as { request: (args: { method: string; params: unknown[] }) => Promise<unknown> };
-      await rpc.request({ method: "evm_increaseTime", params: [PRESALE_COUNTDOWN_HOURS * 3600 + 3600] });
+      await rpc.request({ method: "evm_increaseTime", params: [PRESALE_COUNTDOWN_HOURS * 3600 + 3600 + 20 * 24 * 3600] });
       await rpc.request({ method: "evm_mine", params: [] });
       console.log("Time increased by 121h (Anvil/evm) and block mined.");
     }

@@ -30,9 +30,6 @@ contract TCGVaultFounderNFT is ERC721, Ownable, ReentrancyGuard {
     uint256 public constant WAVE2_PRICE = 350 * 1e6;      // 350 USDC (6 decimals)
     /// @dev 30% of USDC amount (6 decimals) → NEXUS with 18 decimals: amount * 30/100 * 1e18/1e6
     uint256 private constant NEXUS_BONUS_BP = 3000;      // 30%
-    /// @dev USDC split of mint price (basis points; 10% = remainder after vault + liquidity).
-    uint256 private constant USDC_VAULT_ACQUISITIONS_BP = 3000;
-    uint256 private constant USDC_LIQUIDITY_BP = 6000;
 
     uint256 private _nextTokenId;
     /// @notice Count of NFTs minted by the owner in wave 1 (max 5).
@@ -41,47 +38,41 @@ contract TCGVaultFounderNFT is ERC721, Ownable, ReentrancyGuard {
     uint256 private _ownerWave2Mints;
     /// @notice Timestamp when the last NFT of wave 1 is sold (250th); starts the 120h presale countdown (whitepaper §6).
     uint256 private _wave2StartTimestamp;
-    address private _vaultAcquisitionsRecipient;
-    address private _liquidityRecipient;
-    address private _opsRecipient;
+    address private _caspUsdcRecipient;
     /// @notice Base URI for tokenURI (set by owner; used by explorers/marketplaces).
     string private _baseTokenURI;
+
+    uint256 private constant CANCEL_WINDOW = 14 days;
+    mapping(uint256 => uint256) private _purchasedAt;
+    mapping(uint256 => uint256) private _usdcPriceForToken;
+    mapping(uint256 => uint256) private _nexusBonusForToken;
+    mapping(uint256 => bool) private _cancelled;
 
     // External getters (private/external pattern)
     function usdc() external view returns (address) { return address(_usdc); }
     function nexusToken() external view returns (address) { return address(_nexusToken); }
     function wave2StartTimestamp() external view returns (uint256) { return _wave2StartTimestamp; }
-    function vaultAcquisitionsRecipient() external view returns (address) { return _vaultAcquisitionsRecipient; }
-    function liquidityRecipient() external view returns (address) { return _liquidityRecipient; }
-    function opsRecipient() external view returns (address) { return _opsRecipient; }
+    function caspUsdcRecipient() external view returns (address) { return _caspUsdcRecipient; }
     function ownerWave1Mints() external view returns (uint256) { return _ownerWave1Mints; }
     function ownerWave2Mints() external view returns (uint256) { return _ownerWave2Mints; }
 
-    event UsdcRecipientsUpdated(address vaultAcquisitions, address liquidity, address ops);
+    event CaspUsdcRecipientUpdated(address caspUsdcRecipient);
     event BaseURIUpdated(string baseURI);
+    event FounderMinted(address indexed buyer, uint256 indexed tokenId, uint256 usdcAmount, uint256 nexusAmount, uint256 purchasedAt);
+    event FounderPurchaseCancelled(address indexed buyer, uint256 indexed tokenId, uint256 usdcRefundDue, uint256 nexusClawedBack);
 
-    constructor(
-        address usdc_,
-        address nexusToken_,
-        address vaultAcquisitions_,
-        address liquidity_,
-        address ops_
-    )
+    constructor(address usdc_, address nexusToken_, address caspUsdcRecipient_)
         ERC721("TCG-VAULT Founder", "TCGVF")
         Ownable(msg.sender)
     {
         if (
             nexusToken_ == address(0) ||
-            vaultAcquisitions_ == address(0) ||
-            liquidity_ == address(0) ||
-            ops_ == address(0)
+            caspUsdcRecipient_ == address(0)
         ) revert ZeroAddress();
         _usdc = IERC20(usdc_);
         _nexusToken = ITCGNexusToken(nexusToken_);
-        _vaultAcquisitionsRecipient = vaultAcquisitions_;
-        _liquidityRecipient = liquidity_;
-        _opsRecipient = ops_;
-        emit UsdcRecipientsUpdated(vaultAcquisitions_, liquidity_, ops_);
+        _caspUsdcRecipient = caspUsdcRecipient_;
+        emit CaspUsdcRecipientUpdated(caspUsdcRecipient_);
     }
 
     /// @notice Number of Founder NFTs sold (paid mints). Drives presale price wave and 120h countdown.
@@ -97,12 +88,10 @@ contract TCGVaultFounderNFT is ERC721, Ownable, ReentrancyGuard {
         return _nextTokenId < WAVE1_SIZE ? WAVE1_PRICE : WAVE2_PRICE;
     }
 
-    function setUsdcRecipients(address vaultAcquisitions_, address liquidity_, address ops_) external onlyOwner {
-        if (vaultAcquisitions_ == address(0) || liquidity_ == address(0) || ops_ == address(0)) revert ZeroAddress();
-        _vaultAcquisitionsRecipient = vaultAcquisitions_;
-        _liquidityRecipient = liquidity_;
-        _opsRecipient = ops_;
-        emit UsdcRecipientsUpdated(vaultAcquisitions_, liquidity_, ops_);
+    function setCaspUsdcRecipient(address caspUsdcRecipient_) external onlyOwner {
+        if (caspUsdcRecipient_ == address(0)) revert ZeroAddress();
+        _caspUsdcRecipient = caspUsdcRecipient_;
+        emit CaspUsdcRecipientUpdated(caspUsdcRecipient_);
     }
 
     function setBaseURI(string calldata baseURI_) external onlyOwner {
@@ -146,18 +135,48 @@ contract TCGVaultFounderNFT is ERC721, Ownable, ReentrancyGuard {
         _nextTokenId++;
 
         if (tokenId == WAVE1_SIZE - 1) _wave2StartTimestamp = block.timestamp; // 250th sold (0-indexed: 249)
-        uint256 toVault = (price * USDC_VAULT_ACQUISITIONS_BP) / 10000;
-        uint256 toLiquidity = (price * USDC_LIQUIDITY_BP) / 10000;
-        uint256 toOps = price - toVault - toLiquidity;
-        _usdc.transferFrom(msg.sender, _vaultAcquisitionsRecipient, toVault);
-        _usdc.transferFrom(msg.sender, _liquidityRecipient, toLiquidity);
-        _usdc.transferFrom(msg.sender, _opsRecipient, toOps);
+        // MiCA: forward 100% of USDC mint price to an arbitrary CASP address.
+        _usdc.transferFrom(msg.sender, _caspUsdcRecipient, price);
+
         uint256 nexusAmount = (price * NEXUS_BONUS_BP * 1e18) / (10000 * 1e6);
-        if (nexusAmount > 0) {
-            _nexusToken.mintPresaleBonus(msg.sender, nexusAmount);
-        }
+
+        if (nexusAmount > 0) _nexusToken.mintPresaleBonus(msg.sender, nexusAmount);
+
+        _purchasedAt[tokenId] = block.timestamp;
+        _usdcPriceForToken[tokenId] = price;
+        _nexusBonusForToken[tokenId] = nexusAmount;
+
         _safeMint(msg.sender, tokenId);
+
+        emit FounderMinted(msg.sender, tokenId, price, nexusAmount, block.timestamp);
     }
+
+    /// @notice MiCA cooling-off cancellation: burn NFT + claw back minted NEXUS bonus.
+    /// @dev USDC refund is off-chain (CASP rails). This contract emits refundDue amounts for indexing.
+    function cancelFounderPurchase(uint256 tokenId) external nonReentrant {
+        if (msg.sender != ownerOf(tokenId)) revert Unauthorized();
+        if (_cancelled[tokenId]) revert AlreadyCancelled();
+
+        uint256 purchasedAt = _purchasedAt[tokenId];
+        if (purchasedAt == 0) revert NotPurchasable();
+        if (block.timestamp > purchasedAt + CANCEL_WINDOW) revert CancellationWindowEnded();
+
+        _cancelled[tokenId] = true;
+
+        uint256 usdcRefundDue = _usdcPriceForToken[tokenId];
+        uint256 nexusClawedBack = _nexusBonusForToken[tokenId];
+
+        _burn(tokenId);
+
+        if (nexusClawedBack > 0) _nexusToken.burnPresaleBonus(msg.sender, nexusClawedBack);
+
+        emit FounderPurchaseCancelled(msg.sender, tokenId, usdcRefundDue, nexusClawedBack);
+    }
+
+    error Unauthorized();
+    error AlreadyCancelled();
+    error NotPurchasable();
+    error CancellationWindowEnded();
     error ZeroAddress();
     error ExceedsSupply();
     error OwnerWaveQuotaExceeded();

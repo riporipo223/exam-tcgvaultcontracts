@@ -36,11 +36,25 @@ contract TCGVaultInitialLaunch is Ownable, ReentrancyGuard {
     uint256 private _tgeTimestamp;
     address private _treasury;
 
+    uint256 private constant CANCEL_WINDOW = 14 days;
+    uint256 private constant FINALIZE_DELAY_AFTER_PRESALE_END = 20 days;
+
     struct UserAllocation {
         uint256 tcgvAllocated;
         uint256 tcgvClaimed;
     }
     mapping(address => UserAllocation) private _allocations;
+
+    struct Order {
+        address buyer;
+        uint256 usdcAmount;
+        uint256 tcgvAmount;
+        uint256 nexusAmount;
+        uint256 purchasedAt;
+        bool cancelled;
+    }
+    uint256 private _nextOrderId;
+    mapping(uint256 => Order) private _orders;
 
     // External getters (private/external pattern)
     function tcgv() external view returns (address) { return address(_tcgv); }
@@ -57,8 +71,9 @@ contract TCGVaultInitialLaunch is Ownable, ReentrancyGuard {
         return (u.tcgvAllocated, u.tcgvClaimed);
     }
 
-    event Bought(address user, uint256 usdcAmount, uint256 tcgvAllocated);
+    event Bought(address user, uint256 usdcAmount, uint256 tcgvAllocated, uint256 orderId, uint256 purchasedAt);
     event Claimed(address user, uint256 amount);
+    event PresaleOrderCancelled(address indexed user, uint256 indexed orderId, uint256 usdcRefundDue, uint256 tcgvBurned, uint256 nexusClawedBack);
     event Finalized(uint256 tgeTimestamp);
     event TreasuryUpdated(address treasury);
 
@@ -105,25 +120,70 @@ contract TCGVaultInitialLaunch is Ownable, ReentrancyGuard {
         UserAllocation storage u = _allocations[msg.sender];
         if (u.tcgvAllocated + tcgvAmount > maxPerWallet()) revert ExceedsWalletCap();
 
+        uint256 orderId = _nextOrderId;
+        _nextOrderId = orderId + 1;
+
         _totalTCGVAllocated += tcgvAmount;
         u.tcgvAllocated += tcgvAmount;
+
+        uint256 nexusAmount = (usdcAmount * NEXUS_BONUS_BP * 1e18) / (10000 * 1e6);
+        _orders[orderId] = Order({
+            buyer: msg.sender,
+            usdcAmount: usdcAmount,
+            tcgvAmount: tcgvAmount,
+            nexusAmount: nexusAmount,
+            purchasedAt: block.timestamp,
+            cancelled: false
+        });
 
         // Mint TCGV to this contract (vested and claimed by buyer later)
         ITCGVaultToken(address(_tcgv)).mintPresale(address(this), tcgvAmount);
 
-        uint256 nexusAmount = (usdcAmount * NEXUS_BONUS_BP * 1e18) / (10000 * 1e6);
         if (nexusAmount > 0) {
             _nexusToken.mintPresaleBonus(msg.sender, nexusAmount);
         }
 
         _usdc.transferFrom(msg.sender, _treasury, usdcAmount);
-        emit Bought(msg.sender, usdcAmount, tcgvAmount);
+        emit Bought(msg.sender, usdcAmount, tcgvAmount, orderId, block.timestamp);
+    }
+
+    /// @notice MiCA cooling-off cancellation: burn TCGV + claw back NEXUS bonus.
+    /// @dev USDC refunds are handled off-chain by the CASP. This contract only emits refundDue amounts for indexing.
+    function cancelOrder(uint256 orderId) external nonReentrant {
+        if (_tgeTimestamp != 0) revert AlreadyFinalized();
+        Order storage o = _orders[orderId];
+        if (o.buyer == address(0)) revert InvalidOrder();
+        if (o.cancelled) revert OrderAlreadyCancelled();
+        if (msg.sender != o.buyer) revert Unauthorized();
+        if (block.timestamp > o.purchasedAt + CANCEL_WINDOW) revert CancellationWindowEnded();
+
+        o.cancelled = true;
+
+        uint256 tcgvAmount = o.tcgvAmount;
+        UserAllocation storage u = _allocations[msg.sender];
+        u.tcgvAllocated -= tcgvAmount;
+        _totalTCGVAllocated -= tcgvAmount;
+
+        // Burn tokens held by this contract.
+        ITCGVaultToken(address(_tcgv)).burnPresale(address(this), tcgvAmount);
+
+        if (o.nexusAmount > 0) {
+            _nexusToken.burnPresaleBonus(msg.sender, o.nexusAmount);
+        }
+
+        emit PresaleOrderCancelled(
+            msg.sender,
+            orderId,
+            o.usdcAmount,
+            tcgvAmount,
+            o.nexusAmount
+        );
     }
 
     /// @notice Finalize presale and set TGE for vesting. Callable only after the 120h countdown (no early close by owner; no early close when hard cap is reached). Notifies TCGVaultToken to switch cashback from 30% to 10% and recompute supply (whitepaper §6).
     function finalize() external {
         if (_tgeTimestamp != 0) revert AlreadyFinalized();
-        if (block.timestamp < presaleEndTime()) revert PresaleNotEnded();
+        if (block.timestamp < presaleEndTime() + FINALIZE_DELAY_AFTER_PRESALE_END) revert PresaleNotEnded();
         _tgeTimestamp = block.timestamp;
         // Hard requirement: presale finalization and supply recompute must succeed; otherwise finalize reverts.
         ITCGVaultToken(address(_tcgv)).finalizePresaleAndRecompute();
@@ -162,4 +222,8 @@ contract TCGVaultInitialLaunch is Ownable, ReentrancyGuard {
     error AlreadyFinalized();
     error NotFinalized();
     error NothingToClaim();
+    error InvalidOrder();
+    error OrderAlreadyCancelled();
+    error Unauthorized();
+    error CancellationWindowEnded();
 }

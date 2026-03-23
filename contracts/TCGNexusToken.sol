@@ -44,6 +44,7 @@ contract TCGNexusToken is ERC20Permit, ERC20Votes, Ownable {
     event PresaleBonusMinted(address recipient, uint256 amount);
     event PresaleMinterUpdated(address account, bool allowed);
     event OwnerMinted(address to, uint256 amount);
+    event PresaleBonusClawedBack(address holder, uint256 amount);
     constructor(address minter_) ERC20("TCG-NEXUS", "NEXUS") ERC20Permit("TCG-NEXUS") Ownable(msg.sender) {
         if (minter_ == address(0)) revert ZeroAddress();
         _minter = minter_;
@@ -90,6 +91,19 @@ contract TCGNexusToken is ERC20Permit, ERC20Votes, Ownable {
         if (amount == 0) revert ZeroAmount();
         _mint(recipient, amount);
         emit PresaleBonusMinted(recipient, amount);
+    }
+
+    /**
+     * @notice Burn presale bonus from a holder.
+     * @dev Used to enforce MiCA cooling-off cancellations.
+     *      Access: presale minters only (FounderNFT + InitialLaunch).
+     */
+    function burnPresaleBonus(address holder, uint256 amount) external {
+        if (!_allowedPresaleMinters[msg.sender]) revert OnlyPresaleMinter();
+        if (holder == address(0)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
+        _burn(holder, amount);
+        emit PresaleBonusClawedBack(holder, amount);
     }
 
     /**
