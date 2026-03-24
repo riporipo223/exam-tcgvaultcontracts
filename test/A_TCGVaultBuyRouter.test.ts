@@ -83,7 +83,7 @@ async function deployFixture() {
 }
 
 describe("TCGVaultBuyRouter", function () {
-  it("buyTCGVWithUSDC charges 13% USDC fee, burns 2% of TCGV, gives user rest + NEXUS cashback", async function () {
+  it("buyTCGVWithUSDC charges 7% USDC fee (vault+structure), burns 1% of TCGV received, gives user rest + NEXUS cashback", async function () {
     const { owner, tcgv, nexus, buyRouter, usdc } = await networkHelpers.loadFixture(deployFixture);
     const usdcIn = parseUnits("1000", 6);
     const buyer = owner;
@@ -109,6 +109,8 @@ describe("TCGVaultBuyRouter", function () {
     const buyEvent = events.find((e: { transactionHash: `0x${string}` }) => e.transactionHash === hash);
     assert.ok(buyEvent !== undefined);
     assert.ok(buyEvent.args?.feeUSDC !== undefined && buyEvent.args.feeUSDC > 0n);
+    // 4% + 3% = 7% of USDC in
+    assert.strictEqual(buyEvent.args?.feeUSDC, (usdcIn * 700n) / 10000n);
     assert.strictEqual(buyEvent.args?.usdcIn, usdcIn);
     assert.ok(buyEvent.args?.tcgvOut !== undefined && buyEvent.args.tcgvOut > 0n);
 
@@ -162,7 +164,7 @@ describe("TCGVaultBuyRouter", function () {
     );
   });
 
-  it("sellTCGVForUSDC charges 10% fee and gives user USDC", async function (t) {
+  it("sellTCGVForUSDC charges 6% USDC fee and gives user USDC", async function (t) {
     const { owner, tcgv, buyRouter, usdc } = await networkHelpers.loadFixture(deployFixture);
     const seller = owner;
     const tcgvBefore = await tcgv.read.balanceOf([seller.account.address]);

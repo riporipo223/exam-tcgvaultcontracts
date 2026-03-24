@@ -94,8 +94,8 @@ describe("TCGVaultToken", () => {
   let pairAddress: `0x${string}`;
 
   const TOTAL_SUPPLY = parseEther("1000000000");
-  const BUY_TAX_BP = 1500n;
-  const SELL_TAX_BP = 1000n;
+  const BUY_TAX_BP = 800n;
+  const SELL_TAX_BP = 700n;
   const CASHBACK_BP_STANDARD = 1000n; // 10% after presale (whitepaper §6)
   const CASHBACK_BP_PRESALE = 3000n; // 30% during Vagues 1 et 2 (whitepaper §6)
 
@@ -245,7 +245,7 @@ describe("TCGVaultToken", () => {
   });
 
   describe("Router path: buy (ETH -> TCGV)", () => {
-    it("charges 15% buy tax and gives 30% NEXUS cashback during presale", async () => {
+    it("charges 8% buy tax and gives 30% NEXUS cashback during presale", async () => {
       expect(await tcgv.read.presaleActive()).to.equal(true);
       expect(await tcgv.read.minBuyAmount()).to.equal(1n); // set in before() so mock swap amounts pass
       const buyAmountUsdc = parseUnits("100", 6);
@@ -335,7 +335,7 @@ describe("TCGVaultToken", () => {
   });
 
   describe("Router path: sell (TCGV -> USDC)", () => {
-    it("charges 10% sell tax and no cashback", async () => {
+    it("charges 7% sell tax and no cashback", async () => {
       const sellAmount = parseEther("5000");
       const path = [tcgvAddress, usdcAddress] as const;
       const vaultBefore = (await tcgv.read.balanceOf([vault.account.address]));
@@ -1013,7 +1013,7 @@ describe("TCGVaultToken", () => {
     it("setSellFeeParams success: owner updates sell fee params", async () => {
       await tcgv.write.setSellFeeParams([800n, 4000n, 2000n, 2000n, 1000n, 1000n], { account: owner.account });
       expect(await tcgv.read.SELL_TAX()).to.equal(800n);
-      await tcgv.write.setSellFeeParams([SELL_TAX_BP, 4000n, 3000n, 1500n, 1000n, 500n], { account: owner.account });
+      await tcgv.write.setSellFeeParams([SELL_TAX_BP, 3810n, 2857n, 952n, 952n, 1429n], { account: owner.account });
     });
 
     it("setAllocationRecipients success: owner sets liquidity/team/ops", async () => {

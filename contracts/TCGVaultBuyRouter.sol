@@ -29,7 +29,7 @@ error ZeroAddress();
 
 /**
  * @title TCGVaultBuyRouter
- * @notice Buy and sell TCGV against USDC (stablecoin). Buy: USDC fee 13% (10% vault, 3% marketing), then swap remaining USDC for TCGV; 2% of TCGV burned. User receives rest + NEXUS cashback (30% presale, 10% standard — whitepaper §6).
+ * @notice Buy and sell TCGV against USDC (stablecoin). Buy (router): USDC fee 8% (4% vault, 3% structure/marketing), then swap remaining USDC for TCGV; 1% of TCGV received burned. User receives rest + NEXUS cashback (30% presale, 10% standard — whitepaper §6).
  *         Referral: TCGR enregistre le parrain une fois par filleul; chaque achat validé via ce routeur appelle TCGR.processValidatedBuy (0,5 % au parrain, whitepaper).
  * @dev This contract is excluded from fees in TCGVaultToken. Cashback rate is determined by TCGVaultToken (presaleActive).
  *      Uses {ReentrancyGuardTransient} (EIP-1153) for buy/sell entrypoints; requires a chain that supports transient storage.
@@ -40,18 +40,18 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
 
     // Fee params (basis points) — defaults reflect current behavior, but are owner-modifiable.
     // Buy: USDC fee split + TCGV burn on output
-    uint256 private _buyVaultBp = 1000; // 10% of USDC in
-    uint256 private _buyMarketingBp = 300; // 3% of USDC in
+    uint256 private _buyVaultBp = 400; // 4% of USDC in
+    uint256 private _buyMarketingBp = 300; // 3% of USDC in (structure)
     uint256 private _buyCommunityBp = 0; // 0% by default
-    uint256 private _buyTcgvBurnBp = 200; // 2% of TCGV received is burned
+    uint256 private _buyTcgvBurnBp = 100; // 1% of TCGV received is burned
 
-    // Sell: fee in TCGV + distribution
-    uint256 private _sellTaxBp = 1000; // 10%
-    uint256 private _sellVaultShareBp = 4000; // basis points of totalFee
-    uint256 private _sellAutolpShareBp = 3000;
-    uint256 private _sellMarketingShareBp = 1000;
-    uint256 private _sellCommunityShareBp = 1000;
-    uint256 private _sellBurnShareBp = 1000;
+    // Sell: fee on USDC output + optional TCGV burn on input (shares sum to 10000; burn share applies to TCGV in)
+    uint256 private _sellTaxBp = 600; // 6% of USDC received (2% vault, 2% autolp, 1% community, 1% structure)
+    uint256 private _sellVaultShareBp = 3333; // basis points of total USDC fee
+    uint256 private _sellAutolpShareBp = 3333;
+    uint256 private _sellMarketingShareBp = 1667;
+    uint256 private _sellCommunityShareBp = 1667;
+    uint256 private _sellBurnShareBp = 0; // no TCGV burn on router sell by default
 
     address private immutable _router;
     address private immutable _factory;
@@ -235,7 +235,7 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
     }
 
     /**
-     * @notice Buy TCGV with USDC. 13% USDC fee to vault (10%) + marketing (3%); rest swapped for TCGV. 2% of TCGV received is burned. You get rest + NEXUS cashback.
+     * @notice Buy TCGV with USDC. 8% USDC fee (4% vault, 3% structure, 1% burn on TCGV output); rest swapped for TCGV. You get rest + NEXUS cashback.
      *         If TCGR is set, notifies TCGR of this validated buy so the buyer's registered referrer may receive 0.5% TCGR (whitepaper).
      * @param usdcAmount Amount of USDC to spend (must be approved to this router).
      * @param amountOutMin Minimum TCGV to receive.
@@ -311,7 +311,7 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
     }
 
     /**
-     * @notice Sell TCGV for USDC. Fee (10%) is taken in USDC after the swap: 4% vault, 3% autolp (sent to vault for manual LP add), 1% marketing, 1% community, 1% burn (in TCGV).
+     * @notice Sell TCGV for USDC. Fee (6% of USDC out) after swap: 2% vault, 2% autolp (vault for manual LP), 1% community, 1% structure (marketing). No TCGV burn by default.
      */
     function sellTCGVForUSDC(uint256 amountIn, uint256 amountOutMin, uint256 deadline) external nonReentrant {
         if (amountIn == 0) revert ZeroTCGV();

@@ -39,15 +39,15 @@ error EmptyBlacklistReason();
  * @title TCGVaultToken (TCGV)
  * @notice Token A — le Moteur économique (whitepaper §4). BNB Chain, 1 milliard supply.
  * @dev Initial allocation (whitepaper §5): 60% Presale, 20% Liquidité, 4% Team (12mo cliff + 24mo vesting), 16% Ops (5% immediate + 11% over 36mo vesting).
- * @dev Taxe achat 15% (10% Vault, 3% Marketing, 2% burn). Cashback NEXUS: 30% pendant les Vagues 1 et 2 (prévente), 10% en période standard (whitepaper §6).
- * @dev Taxe vente 10%. Protocol admin is {AccessControl}-DEFAULT_ADMIN_ROLE (granted to deployer).
+ * @dev Taxe achat (hors routeur dédié / pool) 8% (répartition type 10/3/2 sur le montant de taxe). Cashback NEXUS: 30% pendant les Vagues 1 et 2 (prévente), 10% en période standard (whitepaper §6).
+ * @dev Taxe vente (pool) 7% (2% liquidité, 1% burn, reste vault/marketing/communauté au ratio historique). Protocol admin is {AccessControl}-DEFAULT_ADMIN_ROLE (granted to deployer).
  */
 contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     /// @notice Hard cap for configurable buy/sell tax rates (25%).
     uint256 public constant MAX_FEE_BP = 2500;
     // Fee parameters (basis points, 10000 = 100%) — whitepaper defaults; owner-modifiable for pool/router modes
-    uint256 public BUY_TAX = 1500; // 15%
-    uint256 public SELL_TAX = 1000; // 10%
+    uint256 public BUY_TAX = 800; // 8% (direct pool / DEX path)
+    uint256 public SELL_TAX = 700; // 7% (direct pool / DEX path)
     /// @notice Standard-period cashback in NEXUS (after presale). Whitepaper §6: 10% — immutable.
     uint256 private constant CASHBACK_RATE = 1000; // 10%
     /// @notice Presale cashback (Vagues 1 et 2). Whitepaper §6: BONUS PIONNIER 30% — immutable.
@@ -58,16 +58,16 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     bool public presaleActive = true;
 
     // Buy tax distribution (basis points of buy feeAmount)
-    uint256 public BUY_VAULT_SHARE = 6667; // 10% of total = 66.67% of 15%
-    uint256 public BUY_MARKETING_SHARE = 2000; // 3% of total = 20% of 15%
-    uint256 public BUY_BURN_SHARE = 1333; // 2% of total = 13.33% of 15%
+    uint256 public BUY_VAULT_SHARE = 6667; // ~5.33% of transfer amount (66.67% of 8% fee)
+    uint256 public BUY_MARKETING_SHARE = 2000; // ~1.6% of transfer (20% of 8% fee)
+    uint256 public BUY_BURN_SHARE = 1333; // ~1.07% of transfer (13.33% of 8% fee)
 
-    // Sell tax distribution (basis points of sell feeAmount)
-    uint256 public SELL_VAULT_SHARE = 4000; // 4% of total = 40% of 10%
-    uint256 public SELL_AUTOLP_SHARE = 3000; // 3% of total = 30% of 10%
-    uint256 public SELL_MARKETING_SHARE = 1000; // 1% of total = 10% of 10%
-    uint256 public SELL_COMMUNITY_SHARE = 1000; // 1% of total = 10% of 10%
-    uint256 public SELL_BURN_SHARE = 1000; // 1% of total = 10% of 10%
+    // Sell tax distribution (basis points of sell feeAmount) — 7% total: 2% liq, 1% burn, rest 4:1:1 vault:marketing:community
+    uint256 public SELL_VAULT_SHARE = 3810;
+    uint256 public SELL_AUTOLP_SHARE = 2857;
+    uint256 public SELL_MARKETING_SHARE = 952;
+    uint256 public SELL_COMMUNITY_SHARE = 952;
+    uint256 public SELL_BURN_SHARE = 1429;
     
     /// @notice Registered Uniswap V2–style DEX routers for metadata / integrations; `factory == address(0)` means not registered.
     mapping(address => address) public dexFactoryForRouter;
