@@ -83,7 +83,7 @@ async function deployFixture() {
 }
 
 describe("TCGVaultBuyRouter", function () {
-  it("buyTCGVWithUSDC charges 7% USDC fee (vault+structure), burns 1% of TCGV received, gives user rest + NEXUS cashback", async function () {
+  it("buyTCGVWithUSDC charges 5% USDC fee (vault+structure), no TCGV burn, gives user TCGV + NEXUS cashback", async function () {
     const { owner, tcgv, nexus, buyRouter, usdc } = await networkHelpers.loadFixture(deployFixture);
     const usdcIn = parseUnits("1000", 6);
     const buyer = owner;
@@ -109,8 +109,8 @@ describe("TCGVaultBuyRouter", function () {
     const buyEvent = events.find((e: { transactionHash: `0x${string}` }) => e.transactionHash === hash);
     assert.ok(buyEvent !== undefined);
     assert.ok(buyEvent.args?.feeUSDC !== undefined && buyEvent.args.feeUSDC > 0n);
-    // 4% + 3% = 7% of USDC in
-    assert.strictEqual(buyEvent.args?.feeUSDC, (usdcIn * 700n) / 10000n);
+    // 3% + 2% = 5% of USDC in
+    assert.strictEqual(buyEvent.args?.feeUSDC, (usdcIn * 500n) / 10000n);
     assert.strictEqual(buyEvent.args?.usdcIn, usdcIn);
     assert.ok(buyEvent.args?.tcgvOut !== undefined && buyEvent.args.tcgvOut > 0n);
 
@@ -164,7 +164,7 @@ describe("TCGVaultBuyRouter", function () {
     );
   });
 
-  it("sellTCGVForUSDC charges 6% USDC fee and gives user USDC", async function (t) {
+  it("sellTCGVForUSDC charges 4% USDC fee and gives user USDC", async function (t) {
     const { owner, tcgv, buyRouter, usdc } = await networkHelpers.loadFixture(deployFixture);
     const seller = owner;
     const tcgvBefore = await tcgv.read.balanceOf([seller.account.address]);
@@ -248,39 +248,28 @@ describe("TCGVaultBuyRouter", function () {
     assert.ok((await buyRouter.read.buyVaultBp()) > 0n);
     assert.ok((await buyRouter.read.buyMarketingBp()) > 0n);
     assert.ok((await buyRouter.read.buyCommunityBp()) >= 0n);
-    assert.ok((await buyRouter.read.buyTcgvBurnBp()) >= 0n);
     assert.ok((await buyRouter.read.sellTaxBp()) > 0n);
     assert.ok((await buyRouter.read.sellVaultShareBp()) >= 0n);
     assert.ok((await buyRouter.read.sellAutolpShareBp()) >= 0n);
     assert.ok((await buyRouter.read.sellMarketingShareBp()) >= 0n);
     assert.ok((await buyRouter.read.sellCommunityShareBp()) >= 0n);
-    assert.ok((await buyRouter.read.sellBurnShareBp()) >= 0n);
   });
   it("owner can setBuyFeeParams setSellFeeParams setReferralToken", async function () {
-    const { buyRouter, owner, tcgvAddress } = await networkHelpers.loadFixture(deployFixture);
+    const { buyRouter, owner } = await networkHelpers.loadFixture(deployFixture);
     const tcgr = await viem.deployContract("TCGRToken", [buyRouter.address], { client: { wallet: owner } });
     await buyRouter.write.setReferralToken([tcgr.address], { account: owner.account });
     assert.strictEqual((await buyRouter.read.referralToken()).toLowerCase(), tcgr.address.toLowerCase());
-    await buyRouter.write.setBuyFeeParams([1000n, 300n, 0n, 200n], { account: owner.account });
+    await buyRouter.write.setBuyFeeParams([1000n, 300n, 0n], { account: owner.account });
     assert.strictEqual(await buyRouter.read.buyVaultBp(), 1000n);
     assert.strictEqual(await buyRouter.read.buyMarketingBp(), 300n);
-    await buyRouter.write.setSellFeeParams([1000n, 4000n, 3000n, 1000n, 1000n, 1000n], { account: owner.account });
+    await buyRouter.write.setSellFeeParams([1000n, 2500n, 2500n, 2500n, 2500n], { account: owner.account });
     assert.strictEqual(await buyRouter.read.sellTaxBp(), 1000n);
   });
 
   it("setBuyFeeParams reverts when vaultBp + marketingBp + communityBp > 25%", async function () {
     const { buyRouter, owner } = await networkHelpers.loadFixture(deployFixture);
     await viem.assertions.revertWithCustomError(
-      buyRouter.write.setBuyFeeParams([2000n, 400n, 101n, 0n], { account: owner.account }),
-      buyRouter,
-      "InvalidFeeParams"
-    );
-  });
-
-  it("setBuyFeeParams reverts when tcgvBurnBp > 25%", async function () {
-    const { buyRouter, owner } = await networkHelpers.loadFixture(deployFixture);
-    await viem.assertions.revertWithCustomError(
-      buyRouter.write.setBuyFeeParams([1000n, 500n, 500n, 2501n], { account: owner.account }),
+      buyRouter.write.setBuyFeeParams([2000n, 400n, 101n], { account: owner.account }),
       buyRouter,
       "InvalidFeeParams"
     );
@@ -289,7 +278,7 @@ describe("TCGVaultBuyRouter", function () {
   it("setSellFeeParams reverts when taxBp > 25%", async function () {
     const { buyRouter, owner } = await networkHelpers.loadFixture(deployFixture);
     await viem.assertions.revertWithCustomError(
-      buyRouter.write.setSellFeeParams([2501n, 4000n, 3000n, 1000n, 1000n, 1000n], { account: owner.account }),
+      buyRouter.write.setSellFeeParams([2501n, 2500n, 2500n, 2500n, 2500n], { account: owner.account }),
       buyRouter,
       "InvalidFeeParams"
     );
@@ -298,7 +287,7 @@ describe("TCGVaultBuyRouter", function () {
   it("setSellFeeParams reverts when shares do not sum to 10000", async function () {
     const { buyRouter, owner } = await networkHelpers.loadFixture(deployFixture);
     await viem.assertions.revertWithCustomError(
-      buyRouter.write.setSellFeeParams([1000n, 4000n, 3000n, 1000n, 500n, 1000n], { account: owner.account }),
+      buyRouter.write.setSellFeeParams([1000n, 4000n, 3000n, 1000n, 500n], { account: owner.account }),
       buyRouter,
       "InvalidFeeParams"
     );
@@ -306,7 +295,7 @@ describe("TCGVaultBuyRouter", function () {
 
   it("buy with communityBp > 0 transfers community share", async function () {
     const { owner, buyRouter, usdc, community } = await networkHelpers.loadFixture(deployFixture);
-    await buyRouter.write.setBuyFeeParams([1000n, 300n, 100n, 200n], { account: owner.account });
+    await buyRouter.write.setBuyFeeParams([1000n, 300n, 100n], { account: owner.account });
     const usdcIn = parseUnits("500", 6);
     await usdc.write.mint([owner.account.address, usdcIn], { account: owner.account });
     await usdc.write.approve([buyRouter.address, usdcIn], { account: owner.account });

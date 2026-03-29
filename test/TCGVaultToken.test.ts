@@ -94,8 +94,8 @@ describe("TCGVaultToken", () => {
   let pairAddress: `0x${string}`;
 
   const TOTAL_SUPPLY = parseEther("1000000000");
-  const BUY_TAX_BP = 800n;
-  const SELL_TAX_BP = 700n;
+  const BUY_TAX_BP = 600n;
+  const SELL_TAX_BP = 500n;
   const CASHBACK_BP_STANDARD = 1000n; // 10% after presale (whitepaper §6)
   const CASHBACK_BP_PRESALE = 3000n; // 30% during Vagues 1 et 2 (whitepaper §6)
 
@@ -245,7 +245,7 @@ describe("TCGVaultToken", () => {
   });
 
   describe("Router path: buy (ETH -> TCGV)", () => {
-    it("charges 8% buy tax and gives 30% NEXUS cashback during presale", async () => {
+    it("charges 6% buy tax and gives 30% NEXUS cashback during presale", async () => {
       expect(await tcgv.read.presaleActive()).to.equal(true);
       expect(await tcgv.read.minBuyAmount()).to.equal(1n); // set in before() so mock swap amounts pass
       const buyAmountUsdc = parseUnits("100", 6);
@@ -273,7 +273,7 @@ describe("TCGVaultToken", () => {
       expect(userReceived > 0n).to.equal(true);
       expect(vaultAfter - vaultBefore >= 0n).to.equal(true);
       expect(marketingAfter - marketingBefore >= 0n).to.equal(true);
-      expect(totalSupplyBefore - totalSupplyAfter > 0n).to.equal(true);
+      expect(totalSupplyAfter).to.equal(totalSupplyBefore);
       const nexusCashback = nexusAfter - nexusBefore;
       expect(nexusCashback > 0n).to.equal(true);
       // Whitepaper §6: presale = 30% of buy amount (in TCGV terms, cashback is % of purchase amount)
@@ -323,19 +323,22 @@ describe("TCGVaultToken", () => {
 
       const user2Before = (await tcgv.read.balanceOf([user2.account.address]));
       const totalSupplyBefore = (await tcgv.read.totalSupply());
+      const pendingBefore = await tcgv.read.pendingAutolp();
 
       await pair.write.swap([amount0Out, amount1Out, user2.account.address, "0x"], { account: user2.account });
 
       const user2After = (await tcgv.read.balanceOf([user2.account.address]));
       const totalSupplyAfter = (await tcgv.read.totalSupply());
+      const pendingAfter = await tcgv.read.pendingAutolp();
 
       expect(user2After >= user2Before).to.equal(true);
-      expect(totalSupplyBefore > totalSupplyAfter).to.equal(true);
+      expect(totalSupplyAfter).to.equal(totalSupplyBefore);
+      expect(pendingAfter > pendingBefore).to.equal(true);
     });
   });
 
   describe("Router path: sell (TCGV -> USDC)", () => {
-    it("charges 7% sell tax and no cashback", async () => {
+    it("charges 5% sell tax and no cashback", async () => {
       const sellAmount = parseEther("5000");
       const path = [tcgvAddress, usdcAddress] as const;
       const vaultBefore = (await tcgv.read.balanceOf([vault.account.address]));
@@ -362,7 +365,7 @@ describe("TCGVaultToken", () => {
       expect(vaultAfter - vaultBefore >= 0n).to.equal(true);
       expect(marketingAfter - marketingBefore >= 0n).to.equal(true);
       expect(communityAfter - communityBefore >= 0n).to.equal(true);
-      expect(totalSupplyBefore - totalSupplyAfter > 0n).to.equal(true);
+      expect(totalSupplyAfter).to.equal(totalSupplyBefore);
       expect(nexusAfter).to.equal(nexusBefore);
     });
   });
@@ -530,9 +533,10 @@ describe("TCGVaultToken", () => {
     });
   });
 
-  describe("Burn", () => {
-    it("buy burn reduces total supply", async () => {
+  describe("Fee routing (no supply burn)", () => {
+    it("buy fee increases pendingAutolp without changing total supply", async () => {
       const supplyBefore = (await tcgv.read.totalSupply());
+      const pendingBefore = await tcgv.read.pendingAutolp();
       const usdcIn = parseUnits("20", 6);
       const path = [usdcAddress, tcgvAddress] as const;
       await usdc.write.approve([routerAddress, usdcIn], { account: user2.account });
@@ -544,11 +548,14 @@ describe("TCGVaultToken", () => {
         (await publicClient.getBlock()).timestamp + 300n
       ], { account: user2.account });
       const supplyAfter = (await tcgv.read.totalSupply());
-      expect(supplyAfter < supplyBefore).to.equal(true);
+      const pendingAfter = await tcgv.read.pendingAutolp();
+      expect(supplyAfter).to.equal(supplyBefore);
+      expect(pendingAfter > pendingBefore).to.equal(true);
     });
 
-    it("sell burn reduces total supply", async () => {
+    it("sell fee increases pendingAutolp without changing total supply", async () => {
       const supplyBefore = (await tcgv.read.totalSupply());
+      const pendingBefore = await tcgv.read.pendingAutolp();
       const sellAmt = parseEther("1000");
       await tcgv.write.approve([routerAddress, sellAmt], { account: user2.account });
       const path = [tcgvAddress, usdcAddress] as const;
@@ -560,7 +567,9 @@ describe("TCGVaultToken", () => {
         (await publicClient.getBlock()).timestamp + 300n
       ], { account: user2.account });
       const supplyAfter = (await tcgv.read.totalSupply());
-      expect(supplyAfter < supplyBefore).to.equal(true);
+      const pendingAfter = await tcgv.read.pendingAutolp();
+      expect(supplyAfter).to.equal(supplyBefore);
+      expect(pendingAfter > pendingBefore).to.equal(true);
     });
   });
 
@@ -981,7 +990,7 @@ describe("TCGVaultToken", () => {
 
     it("setBuyFeeParams reverts InvalidFeeParams when buyTaxBp > 25%", async () => {
       await expectRevert(
-        tcgv.write.setBuyFeeParams([2501n, 5000n, 3000n, 2000n], { account: owner.account })
+        tcgv.write.setBuyFeeParams([2501n, 3334n, 3333n, 3333n], { account: owner.account })
       );
     });
 
@@ -1000,20 +1009,20 @@ describe("TCGVaultToken", () => {
 
     it("setSellFeeParams reverts InvalidFeeParams when sellTaxBp > 25%", async () => {
       await expectRevert(
-        tcgv.write.setSellFeeParams([2501n, 4000n, 2000n, 2000n, 1000n, 1000n], { account: owner.account })
+        tcgv.write.setSellFeeParams([2501n, 2500n, 2500n, 2500n, 2500n], { account: owner.account })
       );
     });
 
     it("setSellFeeParams reverts InvalidFeeParams when shares do not sum to 10000", async () => {
       await expectRevert(
-        tcgv.write.setSellFeeParams([800n, 4000n, 2000n, 2000n, 1000n, 999n], { account: owner.account })
+        tcgv.write.setSellFeeParams([800n, 4000n, 2000n, 2000n, 999n], { account: owner.account })
       );
     });
 
     it("setSellFeeParams success: owner updates sell fee params", async () => {
-      await tcgv.write.setSellFeeParams([800n, 4000n, 2000n, 2000n, 1000n, 1000n], { account: owner.account });
+      await tcgv.write.setSellFeeParams([800n, 2500n, 2500n, 2500n, 2500n], { account: owner.account });
       expect(await tcgv.read.SELL_TAX()).to.equal(800n);
-      await tcgv.write.setSellFeeParams([SELL_TAX_BP, 3810n, 2857n, 952n, 952n, 1429n], { account: owner.account });
+      await tcgv.write.setSellFeeParams([SELL_TAX_BP, 4000n, 4000n, 2000n, 0n], { account: owner.account });
     });
 
     it("setAllocationRecipients success: owner sets liquidity/team/ops", async () => {

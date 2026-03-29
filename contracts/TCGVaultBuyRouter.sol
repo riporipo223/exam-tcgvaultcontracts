@@ -29,7 +29,8 @@ error ZeroAddress();
 
 /**
  * @title TCGVaultBuyRouter
- * @notice Buy and sell TCGV against USDC (stablecoin). Buy (router): USDC fee 8% (4% vault, 3% structure/marketing), then swap remaining USDC for TCGV; 1% of TCGV received burned. User receives rest + NEXUS cashback (30% presale, 10% standard — whitepaper §6).
+ * @notice Buy and sell TCGV against USDC (stablecoin). Buy: 5% USDC fee (3% vault, 2% structure), then swap remaining USDC for TCGV; no TCGV burn. User receives TCGV + NEXUS cashback (30% presale, 10% standard — whitepaper §6).
+ *         Sell: 4% fee on USDC received (1.5% vault, 1% liquidity, 1% community, 0.5% structure); no TCGV burn on input.
  *         Referral: TCGR enregistre le parrain une fois par filleul; chaque achat validé via ce routeur appelle TCGR.processValidatedBuy (0,5 % au parrain, whitepaper).
  * @dev This contract is excluded from fees in TCGVaultToken. Cashback rate is determined by TCGVaultToken (presaleActive).
  *      Uses {ReentrancyGuardTransient} (EIP-1153) for buy/sell entrypoints; requires a chain that supports transient storage.
@@ -38,20 +39,18 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
     /// @notice Hard cap for configurable buy/sell tax rates (25%).
     uint256 public constant MAX_FEE_BP = 2500;
 
-    // Fee params (basis points) — defaults reflect current behavior, but are owner-modifiable.
-    // Buy: USDC fee split + TCGV burn on output
-    uint256 private _buyVaultBp = 400; // 4% of USDC in
-    uint256 private _buyMarketingBp = 300; // 3% of USDC in (structure)
-    uint256 private _buyCommunityBp = 0; // 0% by default
-    uint256 private _buyTcgvBurnBp = 100; // 1% of TCGV received is burned
+    // Fee params (basis points) — owner-modifiable.
+    // Buy: USDC fee split (vault + marketing + community)
+    uint256 private _buyVaultBp = 300; // 3% of USDC in (vault)
+    uint256 private _buyMarketingBp = 200; // 2% of USDC in (structure)
+    uint256 private _buyCommunityBp = 0;
 
-    // Sell: fee on USDC output + optional TCGV burn on input (shares sum to 10000; burn share applies to TCGV in)
-    uint256 private _sellTaxBp = 600; // 6% of USDC received (2% vault, 2% autolp, 1% community, 1% structure)
-    uint256 private _sellVaultShareBp = 3333; // basis points of total USDC fee
-    uint256 private _sellAutolpShareBp = 3333;
-    uint256 private _sellMarketingShareBp = 1667;
-    uint256 private _sellCommunityShareBp = 1667;
-    uint256 private _sellBurnShareBp = 0; // no TCGV burn on router sell by default
+    // Sell: fee on USDC output (shares of fee amount sum to 10000)
+    uint256 private _sellTaxBp = 400; // 4% of USDC received
+    uint256 private _sellVaultShareBp = 3750; // 1.5% of notional
+    uint256 private _sellAutolpShareBp = 2500; // 1% of notional (liquidity)
+    uint256 private _sellMarketingShareBp = 1250; // 0.5% of notional (structure)
+    uint256 private _sellCommunityShareBp = 2500; // 1% of notional
 
     address private immutable _router;
     address private immutable _factory;
@@ -65,14 +64,13 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
     event BuyWithUSDC(address indexed buyer, uint256 usdcIn, uint256 feeUSDC, uint256 tcgvOut);
     event ReferralTokenSet(address token);
     event SellTCGVForUSDC(address seller, uint256 tcgvIn, uint256 feeTCGV, uint256 usdcOut);
-    event BuyFeeParamsUpdated(uint256 vaultBp, uint256 marketingBp, uint256 communityBp, uint256 tcgvBurnBp);
+    event BuyFeeParamsUpdated(uint256 vaultBp, uint256 marketingBp, uint256 communityBp);
     event SellFeeParamsUpdated(
         uint256 taxBp,
         uint256 vaultShareBp,
         uint256 autolpShareBp,
         uint256 marketingShareBp,
-        uint256 communityShareBp,
-        uint256 burnShareBp
+        uint256 communityShareBp
     );
     // External getters (private/external pattern)
     function router() external view returns (address) { return _router; }
@@ -87,14 +85,12 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
     function buyVaultBp() external view returns (uint256) { return _buyVaultBp; }
     function buyMarketingBp() external view returns (uint256) { return _buyMarketingBp; }
     function buyCommunityBp() external view returns (uint256) { return _buyCommunityBp; }
-    function buyTcgvBurnBp() external view returns (uint256) { return _buyTcgvBurnBp; }
 
     function sellTaxBp() external view returns (uint256) { return _sellTaxBp; }
     function sellVaultShareBp() external view returns (uint256) { return _sellVaultShareBp; }
     function sellAutolpShareBp() external view returns (uint256) { return _sellAutolpShareBp; }
     function sellMarketingShareBp() external view returns (uint256) { return _sellMarketingShareBp; }
     function sellCommunityShareBp() external view returns (uint256) { return _sellCommunityShareBp; }
-    function sellBurnShareBp() external view returns (uint256) { return _sellBurnShareBp; }
 
     constructor(
         address router_,
@@ -113,21 +109,16 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
         _marketing = marketing_;
         _community = community_;
         emit ReferralTokenSet(address(0));
-        emit BuyFeeParamsUpdated(_buyVaultBp, _buyMarketingBp, _buyCommunityBp, _buyTcgvBurnBp);
+        emit BuyFeeParamsUpdated(_buyVaultBp, _buyMarketingBp, _buyCommunityBp);
         emit SellFeeParamsUpdated(
             _sellTaxBp,
             _sellVaultShareBp,
             _sellAutolpShareBp,
             _sellMarketingShareBp,
-            _sellCommunityShareBp,
-            _sellBurnShareBp
+            _sellCommunityShareBp
         );
     }
 
-    /**
-     * @notice Update buy fee parameters (router mode).
-     * @dev `vaultBp + marketingBp + communityBp` is taken from msg.value before swap. `tcgvBurnBp` is burned from received TCGV.
-     */
     /**
      * @notice Set the TCGR referral token. Only this router can mint referral rewards.
      */
@@ -136,35 +127,35 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
         emit ReferralTokenSet(token_);
     }
 
+    /**
+     * @notice Update buy fee parameters (router mode).
+     * @dev `vaultBp + marketingBp + communityBp` is taken from USDC in before swap. Sum must not exceed MAX_FEE_BP.
+     */
     function setBuyFeeParams(
         uint256 vaultBp,
         uint256 marketingBp,
-        uint256 communityBp,
-        uint256 tcgvBurnBp
+        uint256 communityBp
     ) external onlyOwner {
         if (vaultBp + marketingBp + communityBp > MAX_FEE_BP) revert InvalidFeeParams();
-        if (tcgvBurnBp > MAX_FEE_BP) revert InvalidFeeParams();
         _buyVaultBp = vaultBp;
         _buyMarketingBp = marketingBp;
         _buyCommunityBp = communityBp;
-        _buyTcgvBurnBp = tcgvBurnBp;
-        emit BuyFeeParamsUpdated(vaultBp, marketingBp, communityBp, tcgvBurnBp);
+        emit BuyFeeParamsUpdated(vaultBp, marketingBp, communityBp);
     }
 
     /**
      * @notice Update sell fee parameters (router mode).
-     * @dev Shares are basis points of the `totalFee` and must sum to 10000.
+     * @dev Shares are basis points of the USDC fee amount and must sum to 10000.
      */
     function setSellFeeParams(
         uint256 taxBp,
         uint256 vaultShareBp,
         uint256 autolpShareBp,
         uint256 marketingShareBp,
-        uint256 communityShareBp,
-        uint256 burnShareBp
+        uint256 communityShareBp
     ) external onlyOwner {
         if (taxBp > MAX_FEE_BP) revert InvalidFeeParams();
-        if (vaultShareBp + autolpShareBp + marketingShareBp + communityShareBp + burnShareBp != 10000) {
+        if (vaultShareBp + autolpShareBp + marketingShareBp + communityShareBp != 10000) {
             revert InvalidFeeParams();
         }
         _sellTaxBp = taxBp;
@@ -172,8 +163,7 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
         _sellAutolpShareBp = autolpShareBp;
         _sellMarketingShareBp = marketingShareBp;
         _sellCommunityShareBp = communityShareBp;
-        _sellBurnShareBp = burnShareBp;
-        emit SellFeeParamsUpdated(taxBp, vaultShareBp, autolpShareBp, marketingShareBp, communityShareBp, burnShareBp);
+        emit SellFeeParamsUpdated(taxBp, vaultShareBp, autolpShareBp, marketingShareBp, communityShareBp);
     }
 
     /**
@@ -235,7 +225,7 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
     }
 
     /**
-     * @notice Buy TCGV with USDC. 8% USDC fee (4% vault, 3% structure, 1% burn on TCGV output); rest swapped for TCGV. You get rest + NEXUS cashback.
+     * @notice Buy TCGV with USDC. 5% USDC fee (3% vault, 2% structure), rest swapped for TCGV. You get TCGV + NEXUS cashback.
      *         If TCGR is set, notifies TCGR of this validated buy so the buyer's registered referrer may receive 0.5% TCGR (whitepaper).
      * @param usdcAmount Amount of USDC to spend (must be approved to this router).
      * @param amountOutMin Minimum TCGV to receive.
@@ -290,14 +280,8 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
         if (tcgvReceived < amountOutMin) revert InsufficientOutputAmount();
         if (tcgvReceived == 0) revert NoTCGVReceived();
 
-        // Burn configured % of received TCGV (burns from this contract, no transfer needed)
-        uint256 burnAmount = (tcgvReceived * _buyTcgvBurnBp) / 10000;
-        if (burnAmount > 0) {
-            _tcgv.burn(burnAmount);
-        }
-
-        // Mint NEXUS cashback and transfer remaining TCGV to user
-        tcgvToUser = tcgvReceived - burnAmount;
+        // Mint NEXUS cashback and transfer TCGV to user
+        tcgvToUser = tcgvReceived;
         _tcgv.recordBuyAndMintCashback(msg.sender, tcgvReceived);
         _tcgv.transfer(msg.sender, tcgvToUser);
     }
@@ -311,7 +295,7 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
     }
 
     /**
-     * @notice Sell TCGV for USDC. Fee (6% of USDC out) after swap: 2% vault, 2% autolp (vault for manual LP), 1% community, 1% structure (marketing). No TCGV burn by default.
+     * @notice Sell TCGV for USDC. Fee (4% of USDC out) after swap: 1.5% vault, 1% autolp (vault for manual LP), 1% community, 0.5% structure (marketing). No TCGV burn.
      */
     function sellTCGVForUSDC(uint256 amountIn, uint256 amountOutMin, uint256 deadline) external nonReentrant {
         if (amountIn == 0) revert ZeroTCGV();
@@ -320,21 +304,14 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
         // Pull TCGV from user
         _tcgv.transferFrom(msg.sender, address(this), amountIn);
 
-        // Burn TCGV portion according to sellBurnShare (the only TCGV-side fee); remainder is swapped for USDC.
-        uint256 burnAmount = (amountIn * _sellBurnShareBp) / 10000;
-        uint256 amountForSwap = amountIn - burnAmount;
-        if (burnAmount > 0) {
-            _tcgv.burn(burnAmount);
-        }
-
         // Build path [TCGV, USDC]
         address[] memory path = new address[](2);
         path[0] = address(_tcgv);
         path[1] = address(_usdc);
 
-        // Get pair address and transfer TCGV to pair (amountIn minus burn)
+        // Get pair address and transfer TCGV to pair
         address pair = _pairFor(path[0], path[1]);
-        _tcgv.transfer(pair, amountForSwap);
+        _tcgv.transfer(pair, amountIn);
 
         // Execute swap and get USDC
         uint256 usdcBefore = _usdc.balanceOf(address(this));
@@ -343,7 +320,7 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
         uint256 usdcReceived = usdcAfter - usdcBefore;
         if (usdcReceived == 0) revert InsufficientOutputAmount();
 
-        // Apply sell fee in USDC on the output: 10% total, split by shares.
+        // Apply sell fee in USDC on the output, split by shares.
         uint256 feeUsdc = (usdcReceived * _sellTaxBp) / 10000;
         uint256 userUsdc = usdcReceived - feeUsdc;
 

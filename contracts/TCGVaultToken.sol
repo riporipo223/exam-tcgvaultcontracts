@@ -39,15 +39,16 @@ error EmptyBlacklistReason();
  * @title TCGVaultToken (TCGV)
  * @notice Token A — le Moteur économique (whitepaper §4). BNB Chain, 1 milliard supply.
  * @dev Initial allocation (whitepaper §5): 60% Presale, 20% Liquidité, 4% Team (12mo cliff + 24mo vesting), 16% Ops (5% immediate + 11% over 36mo vesting).
- * @dev Taxe achat (hors routeur dédié / pool) 8% (répartition type 10/3/2 sur le montant de taxe). Cashback NEXUS: 30% pendant les Vagues 1 et 2 (prévente), 10% en période standard (whitepaper §6).
- * @dev Taxe vente (pool) 7% (2% liquidité, 1% burn, reste vault/marketing/communauté au ratio historique). Protocol admin is {AccessControl}-DEFAULT_ADMIN_ROLE (granted to deployer).
+ * @dev Taxe achat (pool / DEX direct — pas le routeur USDC dédié): 6% TCGV: 2% vault, 2% marketing, 2% liquidité (pendingAutolp). Pas de burn sur les frais.
+ * @dev Taxe vente (pool): 5% TCGV: 2% vault, 1% marketing, 2% autolp. Cashback NEXUS: 30% prévente, 10% standard (whitepaper §6).
+ * @dev Protocol admin is {AccessControl}-DEFAULT_ADMIN_ROLE (granted to deployer).
  */
 contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     /// @notice Hard cap for configurable buy/sell tax rates (25%).
     uint256 public constant MAX_FEE_BP = 2500;
-    // Fee parameters (basis points, 10000 = 100%) — whitepaper defaults; owner-modifiable for pool/router modes
-    uint256 public BUY_TAX = 800; // 8% (direct pool / DEX path)
-    uint256 public SELL_TAX = 700; // 7% (direct pool / DEX path)
+    // Fee parameters (basis points, 10000 = 100%) — pool defaults; owner-modifiable
+    uint256 public BUY_TAX = 600; // 6% (direct pool / DEX path)
+    uint256 public SELL_TAX = 500; // 5% (direct pool / DEX path)
     /// @notice Standard-period cashback in NEXUS (after presale). Whitepaper §6: 10% — immutable.
     uint256 private constant CASHBACK_RATE = 1000; // 10%
     /// @notice Presale cashback (Vagues 1 et 2). Whitepaper §6: BONUS PIONNIER 30% — immutable.
@@ -57,17 +58,16 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     /// @notice When true, cashback uses 30%; when false (after presale finalize), uses 10%. Only set when presale finalizer calls finalizePresaleAndRecompute().
     bool public presaleActive = true;
 
-    // Buy tax distribution (basis points of buy feeAmount)
-    uint256 public BUY_VAULT_SHARE = 6667; // ~5.33% of transfer amount (66.67% of 8% fee)
-    uint256 public BUY_MARKETING_SHARE = 2000; // ~1.6% of transfer (20% of 8% fee)
-    uint256 public BUY_BURN_SHARE = 1333; // ~1.07% of transfer (13.33% of 8% fee)
+    // Buy tax distribution (basis points of buy feeAmount; sum 10000)
+    uint256 public BUY_VAULT_SHARE = 3333; // 1/3 of fee → vault
+    uint256 public BUY_MARKETING_SHARE = 3333; // 1/3 of fee → marketing
+    uint256 public BUY_AUTOLP_SHARE = 3334; // 1/3 of fee → pendingAutolp (liquidité)
 
-    // Sell tax distribution (basis points of sell feeAmount) — 7% total: 2% liq, 1% burn, rest 4:1:1 vault:marketing:community
-    uint256 public SELL_VAULT_SHARE = 3810;
-    uint256 public SELL_AUTOLP_SHARE = 2857;
-    uint256 public SELL_MARKETING_SHARE = 952;
-    uint256 public SELL_COMMUNITY_SHARE = 952;
-    uint256 public SELL_BURN_SHARE = 1429;
+    // Sell tax distribution (basis points of sell feeAmount; sum 10000)
+    uint256 public SELL_VAULT_SHARE = 4000; // 2% of notional (40% of 5% fee)
+    uint256 public SELL_AUTOLP_SHARE = 4000; // 2% of notional
+    uint256 public SELL_MARKETING_SHARE = 2000; // 1% of notional
+    uint256 public SELL_COMMUNITY_SHARE = 0;
     
     /// @notice Registered Uniswap V2–style DEX routers for metadata / integrations; `factory == address(0)` means not registered.
     mapping(address => address) public dexFactoryForRouter;
@@ -108,7 +108,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     uint256 public minSellAmount;
     mapping(address => bool) public isExcludedFromFees;
     mapping(address => bool) public isPair;
-    /// @notice Accumulated sell-fee autolp tokens; add to LP via executePendingAutolp() to avoid updating pair reserves during sell transfer (fixes router INSUFFICIENT_INPUT_AMOUNT).
+    /// @notice Accumulated buy/sell-fee autolp tokens; add to LP via executePendingAutolp() to avoid updating pair reserves during sell transfer (fixes router INSUFFICIENT_INPUT_AMOUNT).
     uint256 public pendingAutolp;
     /// @notice Blacklist: when true, address cannot send nor receive TCGV (fraud, market manipulation, Sybil).
     mapping(address => bool) public isBlacklisted;
@@ -129,14 +129,18 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     );
     event CashbackDistributed(address recipient, uint256 amount);
     event LiquidityAdded(uint256 tokenAmount, uint256 ethAmount);
-    event BuyFeeParamsUpdated(uint256 buyTaxBp, uint256 vaultShareBp, uint256 marketingShareBp, uint256 burnShareBp);
+    event BuyFeeParamsUpdated(
+        uint256 buyTaxBp,
+        uint256 vaultShareBp,
+        uint256 marketingShareBp,
+        uint256 autolpShareBp
+    );
     event SellFeeParamsUpdated(
         uint256 sellTaxBp,
         uint256 vaultShareBp,
         uint256 autolpShareBp,
         uint256 marketingShareBp,
-        uint256 communityShareBp,
-        uint256 burnShareBp
+        uint256 communityShareBp
     );
     event PresaleFinalized();
     event SupplyRecomputed(uint256 presaleSold, uint256 finalTotalSupply, uint256 mintedLiquidity, uint256 mintedTeamVesting, uint256 mintedOpsDirect, uint256 mintedOpsVesting);
@@ -199,14 +203,13 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         emit FeesEnabledUpdated(feesEnabled);
         emit CashbackEnabledUpdated(cashbackEnabled);
         emit PresaleActiveUpdated(presaleActive);
-        emit BuyFeeParamsUpdated(BUY_TAX, BUY_VAULT_SHARE, BUY_MARKETING_SHARE, BUY_BURN_SHARE);
+        emit BuyFeeParamsUpdated(BUY_TAX, BUY_VAULT_SHARE, BUY_MARKETING_SHARE, BUY_AUTOLP_SHARE);
         emit SellFeeParamsUpdated(
             SELL_TAX,
             SELL_VAULT_SHARE,
             SELL_AUTOLP_SHARE,
             SELL_MARKETING_SHARE,
-            SELL_COMMUNITY_SHARE,
-            SELL_BURN_SHARE
+            SELL_COMMUNITY_SHARE
         );
 
         // No initial mint. Supply is minted during presale (mintPresale by launch contract) and at presale end (finalizePresaleAndRecompute mints 20% liquidity, 4% team vesting, 5% ops direct, 11% ops vesting — whitepaper §5).
@@ -345,15 +348,15 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         uint256 buyTaxBp,
         uint256 vaultShareBp,
         uint256 marketingShareBp,
-        uint256 burnShareBp
+        uint256 autolpShareBp
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (buyTaxBp > MAX_FEE_BP) revert InvalidFeeParams();
-        if (vaultShareBp + marketingShareBp + burnShareBp != 10000) revert InvalidFeeParams();
+        if (vaultShareBp + marketingShareBp + autolpShareBp != 10000) revert InvalidFeeParams();
         BUY_TAX = buyTaxBp;
         BUY_VAULT_SHARE = vaultShareBp;
         BUY_MARKETING_SHARE = marketingShareBp;
-        BUY_BURN_SHARE = burnShareBp;
-        emit BuyFeeParamsUpdated(buyTaxBp, vaultShareBp, marketingShareBp, burnShareBp);
+        BUY_AUTOLP_SHARE = autolpShareBp;
+        emit BuyFeeParamsUpdated(buyTaxBp, vaultShareBp, marketingShareBp, autolpShareBp);
     }
 
     /**
@@ -365,11 +368,10 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         uint256 vaultShareBp,
         uint256 autolpShareBp,
         uint256 marketingShareBp,
-        uint256 communityShareBp,
-        uint256 burnShareBp
+        uint256 communityShareBp
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (sellTaxBp > MAX_FEE_BP) revert InvalidFeeParams();
-        if (vaultShareBp + autolpShareBp + marketingShareBp + communityShareBp + burnShareBp != 10000) {
+        if (vaultShareBp + autolpShareBp + marketingShareBp + communityShareBp != 10000) {
             revert InvalidFeeParams();
         }
         SELL_TAX = sellTaxBp;
@@ -377,14 +379,12 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         SELL_AUTOLP_SHARE = autolpShareBp;
         SELL_MARKETING_SHARE = marketingShareBp;
         SELL_COMMUNITY_SHARE = communityShareBp;
-        SELL_BURN_SHARE = burnShareBp;
         emit SellFeeParamsUpdated(
             sellTaxBp,
             vaultShareBp,
             autolpShareBp,
             marketingShareBp,
-            communityShareBp,
-            burnShareBp
+            communityShareBp
         );
     }
 
@@ -617,7 +617,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     function _handleBuy(address from, address to, uint256 amount) private {
         uint256 feeAmount = (amount * BUY_TAX) / 10000;
 
-        // Pair sends full amount to buyer; then buyer pays fees to vault/marketing/burn.
+        // Pair sends full amount to buyer; then buyer pays fees to vault/marketing/autolp.
         super._update(from, to, amount);
         if (feeAmount > 0) _distributeBuyFeesFrom(to, feeAmount);
         _distributeCashback(to, amount);
@@ -640,12 +640,15 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     function _distributeBuyFeesFrom(address from, uint256 totalFee) private {
         uint256 vaultAmount = (totalFee * BUY_VAULT_SHARE) / 10000;
         uint256 marketingAmount = (totalFee * BUY_MARKETING_SHARE) / 10000;
-        uint256 burnAmount = (totalFee * BUY_BURN_SHARE) / 10000;
+        uint256 autolpAmount = (totalFee * BUY_AUTOLP_SHARE) / 10000;
 
         if (vaultAmount > 0) super._update(from, vaultAddress, vaultAmount);
         if (marketingAmount > 0) super._update(from, marketingAddress, marketingAmount);
-        if (burnAmount > 0) _burn(from, burnAmount);
-        emit FeesDistributed(vaultAmount, marketingAmount, 0, burnAmount, 0);
+        if (autolpAmount > 0) {
+            super._update(from, address(this), autolpAmount);
+            pendingAutolp += autolpAmount;
+        }
+        emit FeesDistributed(vaultAmount, marketingAmount, 0, 0, autolpAmount);
     }
 
     /**
@@ -656,7 +659,6 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         uint256 autolpAmount = (totalFee * SELL_AUTOLP_SHARE) / 10000;
         uint256 marketingAmount = (totalFee * SELL_MARKETING_SHARE) / 10000;
         uint256 communityAmount = (totalFee * SELL_COMMUNITY_SHARE) / 10000;
-        uint256 burnAmount = (totalFee * SELL_BURN_SHARE) / 10000;
 
         if (vaultAmount > 0) super._update(from, vaultAddress, vaultAmount);
         if (autolpAmount > 0) {
@@ -665,8 +667,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         }
         if (marketingAmount > 0) super._update(from, marketingAddress, marketingAmount);
         if (communityAmount > 0) super._update(from, communityAddress, communityAmount);
-        if (burnAmount > 0) _burn(from, burnAmount);
-        emit FeesDistributed(vaultAmount, marketingAmount, communityAmount, burnAmount, autolpAmount);
+        emit FeesDistributed(vaultAmount, marketingAmount, communityAmount, 0, autolpAmount);
     }
 
     /**
@@ -682,7 +683,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     }
 
     /**
-     * @notice Execute pending autolp (sell-fee portion).
+     * @notice Execute pending autolp (buy + sell fee liquidity portions).
      * @dev Liquidity is handled manually by the designated wallet off-chain. This function
      *      simply transfers the accumulated autolp tokens to the vault/liquidity wallet so
      *      it can add liquidity directly on PancakeSwap.
