@@ -27,6 +27,13 @@
  *     set `STAKING_VAULT_ADDRESS` and `BASIC_NFT_ADDRESS` when running subgraph `sync:pipeline`.
  *   - MOCK_USDC_MINT_DEPLOYER=0 — when deploying MockUSDC, skip minting 1M USDC to deployer
  *   - BASIC_NFT_MIN_STAKE — min stake as **decimal TCGV string** (e.g. `5000`); parsed with `parseEther` (default: `5000`)
+ *   - DEPLOY_RECEIPT_TIMEOUT_MS — per-attempt waitForTransactionReceipt timeout (default: 300000)
+ *   - DEPLOY_RECEIPT_POLL_MS — polling interval ms (default: 4000; slower helps flaky BSC testnet RPCs)
+ *   - DEPLOY_RECEIPT_MAX_ATTEMPTS — retries when receipt is missing (default: 5)
+ *
+ * Gas (BSC testnet):
+ *   - If txs fail with "transaction underpriced", set BSCTEST_GAS_PRICE_WEI in .env (wei), e.g.
+ *     15000000000 for 15 gwei. Default in hardhat.config.ts is 11 gwei when the env is unset.
  *
  * If TCGR is skipped, subgraph/Turbo sync is skipped (manifest requires TCGR + converter addresses).
  *
@@ -136,6 +143,44 @@ async function main() {
   const publicClient = await viem.getPublicClient();
   const deploymentBlocks: bigint[] = [];
 
+  const receiptTimeoutMs = Number(process.env.DEPLOY_RECEIPT_TIMEOUT_MS ?? 300_000);
+  const receiptPollMs = Number(process.env.DEPLOY_RECEIPT_POLL_MS ?? 4_000);
+  const receiptMaxAttempts = Math.max(1, Number(process.env.DEPLOY_RECEIPT_MAX_ATTEMPTS ?? 5));
+
+  /**
+   * BSC testnet RPCs often lag or return null receipts briefly; viem's default timeout/poll
+   * can throw TransactionReceiptNotFoundError even when the tx will confirm.
+   */
+  async function waitForTxReceipt(hash: `0x${string}`) {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= receiptMaxAttempts; attempt++) {
+      try {
+        const receipt = await publicClient.waitForTransactionReceipt({
+          hash,
+          timeout: receiptTimeoutMs,
+          pollingInterval: receiptPollMs,
+        });
+        return receipt;
+      } catch (e) {
+        lastError = e;
+        const msg = e instanceof Error ? e.message : String(e);
+        const missing =
+          msg.includes("could not be found") ||
+          msg.includes("not be processed") ||
+          msg.includes("ReceiptNotFound");
+        if (!missing || attempt === receiptMaxAttempts) {
+          throw e;
+        }
+        const backoff = Math.min(30_000, 5_000 * attempt);
+        console.warn(
+          `[deploy] Receipt not ready for ${hash.slice(0, 18)}… (${msg.slice(0, 100)}). Retry ${attempt}/${receiptMaxAttempts} in ${backoff}ms`,
+        );
+        await sleep(backoff);
+      }
+    }
+    throw lastError;
+  }
+
   async function deployTracked(
     contractName: string,
     constructorArgs: readonly unknown[] = [],
@@ -146,9 +191,7 @@ async function main() {
       constructorArgs as never,
       deployConfig as never,
     );
-    const receipt = await publicClient.waitForTransactionReceipt({
-      hash: deploymentTransaction.hash,
-    });
+    const receipt = await waitForTxReceipt(deploymentTransaction.hash);
     deploymentBlocks.push(receipt.blockNumber);
     return contract as { address: Address };
   }
@@ -208,7 +251,7 @@ async function main() {
       const m = await viem.getContractAt("contracts/test/MockUSDC.sol:MockUSDC", usdcAddress);
       const mintAmt = 1_000_000n * USDC_6;
       const h = await m.write.mint([deployerAddr, mintAmt], { account: deployer.account });
-      await publicClient.waitForTransactionReceipt({ hash: h });
+      await waitForTxReceipt(h);
       console.log(`Minted ${Number(mintAmt) / 1e6} USDC to deployer for tests.`);
     }
     verifyJobs.push({
@@ -314,13 +357,13 @@ async function main() {
     [liquidityRecipient, teamRecipient, opsRecipient],
     { account: deployer.account },
   );
-  await publicClient.waitForTransactionReceipt({ hash: setAllocHash });
+  await waitForTxReceipt(setAllocHash);
   console.log("token.setAllocationRecipients ✓");
 
   let h = await nexusToken.write.setPresaleMinter([founderNFTAddress, true], { account: deployer.account });
-  await publicClient.waitForTransactionReceipt({ hash: h });
+  await waitForTxReceipt(h);
   h = await nexusToken.write.setPresaleMinter([initialLaunchAddress, true], { account: deployer.account });
-  await publicClient.waitForTransactionReceipt({ hash: h });
+  await waitForTxReceipt(h);
   console.log("Nexus presale minters: FounderNFT + InitialLaunch");
   console.log();
 
@@ -352,9 +395,9 @@ async function main() {
     : parseEther("5000");
   const stakingVaultContract = await viem.getContractAt("TCGVaultStakingVault", stakingVaultAddress);
   h = await stakingVaultContract.write.setMinStakeForBasicNFT([minStakeForBasic], { account: deployer.account });
-  await publicClient.waitForTransactionReceipt({ hash: h });
+  await waitForTxReceipt(h);
   h = await stakingVaultContract.write.setBasicNFTContract([basicNFTAddress], { account: deployer.account });
-  await publicClient.waitForTransactionReceipt({ hash: h });
+  await waitForTxReceipt(h);
   console.log(
     "stakingVault.setMinStakeForBasicNFT / setBasicNFTContract ✓ (min shares:",
     minStakeForBasic.toString(),
@@ -362,7 +405,7 @@ async function main() {
   );
 
   h = await token.write.setExcludedFromFees([stakingVaultAddress, true], { account: deployer.account });
-  await publicClient.waitForTransactionReceipt({ hash: h });
+  await waitForTxReceipt(h);
   console.log("token.setExcludedFromFees(stakingVault) ✓ (deposits are full-amount)");
   console.log();
 
@@ -395,7 +438,7 @@ async function main() {
   });
 
   h = await token.write.setBuyRouter([buyRouterAddress], { account: deployer.account });
-  await publicClient.waitForTransactionReceipt({ hash: h });
+  await waitForTxReceipt(h);
   console.log("token.setBuyRouter ✓");
 
   const wrapper = await deployTracked(
@@ -413,7 +456,7 @@ async function main() {
   });
 
   h = await token.write.setExcludedFromFees([wrapperAddress, true], { account: deployer.account });
-  await publicClient.waitForTransactionReceipt({ hash: h });
+  await waitForTxReceipt(h);
   console.log("token.setExcludedFromFees(wrapper) ✓");
   console.log();
 
@@ -431,7 +474,7 @@ async function main() {
     });
     const buyRouter = await viem.getContractAt("TCGVaultBuyRouter", buyRouterAddress);
     h = await buyRouter.write.setReferralToken([tcgrAddress], { account: deployer.account });
-    await publicClient.waitForTransactionReceipt({ hash: h });
+    await waitForTxReceipt(h);
 
     const converter = await deployTracked(
       "TCGRToTCGVConverter",
@@ -447,7 +490,7 @@ async function main() {
     });
     const tcgrC = await viem.getContractAt("TCGRToken", tcgrAddress);
     h = await tcgrC.write.setConverter([converterAddress], { account: deployer.account });
-    await publicClient.waitForTransactionReceipt({ hash: h });
+    await waitForTxReceipt(h);
     console.log("TCGRToken:", tcgrAddress);
     console.log("TCGRToTCGVConverter:", converterAddress, "(fund converter with TCGV before convert)");
     console.log();

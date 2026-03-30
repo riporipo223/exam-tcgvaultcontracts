@@ -105,7 +105,12 @@ export default defineConfig({
       chainType: "l1",
       url: configVariable("BSCTEST_RPC_URL"),
       chainId: 97,
-      gasPrice: "auto",
+      // Many BSC testnet RPCs return a low eth_gasPrice; the mempool then rejects with
+      // "transaction underpriced". Use a sane floor (11 gwei) or set BSCTEST_GAS_PRICE_WEI in .env.
+      gasPrice: process.env.BSCTEST_GAS_PRICE_WEI?.trim()
+        ? BigInt(process.env.BSCTEST_GAS_PRICE_WEI.trim())
+        : 11_000_000_000n,
+      gasMultiplier: 1.15,
       accounts: [configVariable("TCG_KEY")],
     },
     tenderly: {
