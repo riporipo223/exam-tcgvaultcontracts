@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.27;
+pragma solidity 0.8.27;
 
 /// @notice Router interface for add/remove liquidity (Uniswap V2 / PancakeSwap compatible). TCGV/USDC pool.
 interface IRouter {

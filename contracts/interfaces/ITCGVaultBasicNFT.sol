@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.27;
+pragma solidity 0.8.27;
 
 interface ITCGVaultBasicNFT {
     /// @notice Mints one Basic NFT for `account` if they have enough stake. Only callable by the staking vault (e.g. after deposit).

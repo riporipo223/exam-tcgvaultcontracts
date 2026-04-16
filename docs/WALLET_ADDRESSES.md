@@ -4,19 +4,19 @@ Use the same Ethereum addresses in `.env` as in your operational wallet list. Va
 
 | # | French (review) | English (same meaning) | Environment variable | On-chain use (summary) |
 |---|-----------------|------------------------|----------------------|-------------------------|
-| 1 | Wallet **Vault communautaire** (USDC) | **Community protocol vault** (USDC) | `VAULT_ADDRESS` | Buy/sell fee shares (vault + autolp routing to vault), BuyRouter USDC fees; also **30%** of Founder NFT mint USDC (physical Vault acquisitions, whitepaper). |
-| 2 | Wallet **Marketing & Structure** | **Marketing & structure** (fees) | `MARKETING_ADDRESS` | TCGV buy/sell fee share to marketing & structure. |
-| 3 | Wallet **Liquidité** | **Liquidity** | `LIQUIDITY_RECIPIENT` | Post–presale finalize: TCGV liquidity allocation; **60%** of Founder NFT mint USDC (project liquidity, whitepaper). |
-| 4 | Wallet **Burn** (ou adresse dead) | **Burn** — *no wallet* | *(none)* | TCGV **burn** is **on-chain supply reduction** (`_burn`), not a transfer to an address. There is **no** `BURN_ADDRESS` in `.env`. If documentation mentions a “dead” address, that is **not** where router/token burns send funds. |
-| 5 | Wallet **Récompenses communautaires** | **Community rewards** | `COMMUNITY_ADDRESS` | TCGV sell (and optional buy) fee share for community rewards. |
-| 6 | Wallet **Réserve de structuration** (ex. 70k) | **Structuring reserve** / team reserve (e.g. 70k allocation) | `TEAM_RECIPIENT` | Post–presale finalize: team vesting allocation (aligns with “structuring reserve” in tokenomics). |
+| 1 | Wallet **Vault communautaire** (USDC) | **Community protocol vault** (USDC) | `VAULT_ADDRESS` | Vault share of **direct pool** fees (TCGV) and of **BuyRouter** USDC fees; Founder NFT mint: **30%** of USDC to vault (`TCGVaultFounderNFT`). Autolp accrual on the token is executed separately — see `executePendingAutolp` / [**FEE_REFERENCE.md**](FEE_REFERENCE.md). |
+| 2 | Wallet **Marketing & Structure** | **Marketing & structure** (fees) | `MARKETING_ADDRESS` | Marketing share of direct pool fees (TCGV) and BuyRouter USDC fees. |
+| 3 | Wallet **Liquidité** | **Liquidity** | `LIQUIDITY_RECIPIENT` | Post–presale finalize: TCGV liquidity allocation; **60%** of Founder NFT mint USDC (`TCGVaultFounderNFT`). |
+| 4 | Wallet **Burn** (ou adresse dead) | **Burn** — *no wallet* | *(none)* | Swap **fees** do **not** route to a “burn wallet”: there is **no** `BURN_ADDRESS` in `.env`. Supply still changes via **minting** (presale, cashback, allocations) and **one-off** tokenomics paths documented in `TCGVaultToken`; do not assume a dead-address fee sink for trading. |
+| 5 | Wallet **Récompenses communautaires** | **Community rewards** | `COMMUNITY_ADDRESS` | **BuyRouter** default sell path sends part of the **USDC** fee here (see [**FEE_REFERENCE.md**](FEE_REFERENCE.md) §2.2). **Direct pool** sell defaults give **0%** of the sell fee to community unless `SELL_COMMUNITY_SHARE` / params are changed on-chain. |
+| 6 | Wallet **Réserve de structuration** (ex. 70k) | **Structuring reserve** / team reserve (e.g. 70k allocation) | `TEAM_RECIPIENT` | Post–presale finalize: team vesting recipient (`TCGVaultToken` allocation / `claimTeam`). |
 
 ### Other required `.env` addresses (same deployment, not in the 6-row table above)
 
 | English | Environment variable | Role |
 |---------|------------------------|------|
 | **InitialLaunch USDC treasury** | `TREASURY_ADDRESS` | USDC from token presale (`TCGVaultInitialLaunch`), not Founder NFT proceeds. |
-| **Operations & ecosystem** | `OPS_RECIPIENT` | Post–presale: direct + vesting ops allocation; **10%** of Founder NFT mint USDC (ops / legal / community dev, whitepaper). |
+| **Operations & ecosystem** | `OPS_RECIPIENT` | Post–presale: direct + vesting ops allocation; **10%** of Founder NFT mint USDC (`TCGVaultFounderNFT`). |
 
 ### Quick mapping checklist
 

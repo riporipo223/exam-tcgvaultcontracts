@@ -1,5 +1,5 @@
 import hre from "hardhat";
-import { formatEther, getContractAddress, type Address } from "viem";
+import { formatEther, getContractAddress, type Address, zeroAddress } from "viem";
 import { execSync } from "node:child_process";
 
 function sleep(ms: number): Promise<void> {
@@ -152,6 +152,7 @@ async function main() {
 
   console.log("\n2. Deploying TCGVaultToken (NEXUS immutable from constructor)...");
   await viem.deployContract("TCGVaultToken", [
+    zeroAddress,
     pancakeRouter,
     vaultAddress,
     marketingAddress,
@@ -166,6 +167,7 @@ async function main() {
   verifyJobs.push({
     address: tokenAddress,
     constructorArguments: [
+      zeroAddress,
       pancakeRouter,
       vaultAddress,
       marketingAddress,

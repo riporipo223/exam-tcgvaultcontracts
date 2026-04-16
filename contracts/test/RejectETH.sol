@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.27;
+pragma solidity 0.8.27;
 
 /// @notice Used in tests to simulate vault/marketing rejecting BNB
 contract RejectETH {

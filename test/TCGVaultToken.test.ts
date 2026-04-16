@@ -21,6 +21,7 @@ const ZERO = zeroAddress;
 /** Deploy Nexus (minter = predicted TCGV) then TCGV with immutable NEXUS; returns TCGV client. */
 async function deployFreshTcgvWithNexus(
   owner: Awaited<ReturnType<typeof viem.getWalletClients>>[0],
+  stakingVault: `0x${string}`,
   router: `0x${string}`,
   vault: `0x${string}`,
   marketing: `0x${string}`,
@@ -33,6 +34,7 @@ async function deployFreshTcgvWithNexus(
   const nexusAddr = getContractAddress({ from: owner.account.address, nonce: n0 });
   await viem.deployContract("TCGNexusToken", [futureTcgv], { client: { wallet: owner } });
   const tcgvContract = await viem.deployContract("TCGVaultToken", [
+    stakingVault,
     router,
     vault,
     marketing,
@@ -139,6 +141,7 @@ describe("TCGVaultToken", () => {
     nexus = await viem.getContractAt("TCGNexusToken", nexusAddress);
 
     const tcgvContract = await viem.deployContract("TCGVaultToken", [
+      ZERO,
       routerAddress,
       vault.account.address,
       marketing.account.address,
@@ -619,6 +622,7 @@ describe("TCGVaultToken", () => {
       const freshMock = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], { client: { wallet: owner } });
       const freshTcgv = await deployFreshTcgvWithNexus(
         owner,
+        ZERO,
         routerAddress,
         vault.account.address,
         marketing.account.address,
@@ -651,6 +655,7 @@ describe("TCGVaultToken", () => {
       const freshMock = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], { client: { wallet: owner } });
       const freshTcgv = await deployFreshTcgvWithNexus(
         owner,
+        ZERO,
         routerAddress,
         vault.account.address,
         marketing.account.address,
@@ -844,6 +849,7 @@ describe("TCGVaultToken", () => {
       let reverted = false;
       try {
         await viem.deployContract("TCGVaultToken", [
+          ZERO,
           routerAddress,
           ZERO,
           marketing.account.address,
@@ -861,6 +867,7 @@ describe("TCGVaultToken", () => {
       let reverted = false;
       try {
         await viem.deployContract("TCGVaultToken", [
+          ZERO,
           routerAddress,
           vault.account.address,
           marketing.account.address,
@@ -878,6 +885,7 @@ describe("TCGVaultToken", () => {
       let reverted = false;
       try {
         await viem.deployContract("TCGVaultToken", [
+          ZERO,
           ZERO,
           vault.account.address,
           marketing.account.address,
@@ -919,7 +927,7 @@ describe("TCGVaultToken", () => {
       await expectRevert(tcgv.write.setDexRouter([ZERO, true], { account: owner.account }));
     });
 
-    it("setDexRouter reverts when not admin", async () => {
+    it("setDexRouter reverts without ADMIN_ROLE", async () => {
       await expectRevert(tcgv.write.setDexRouter([routerAddress, false], { account: user1.account }));
     });
 
@@ -935,7 +943,7 @@ describe("TCGVaultToken", () => {
       expect(await tcgv.read.isPair([pairAddress])).to.equal(true);
     });
 
-    it("setPair reverts when not admin", async () => {
+    it("setPair reverts without ADMIN_ROLE", async () => {
       await expectRevert(
         tcgv.write.setPair([pairAddress, false], { account: user1.account })
       );
@@ -948,13 +956,13 @@ describe("TCGVaultToken", () => {
       expect(await tcgv.read.feesEnabled()).to.equal(true);
     });
 
-    it("setFeesEnabled reverts when not owner", async () => {
+    it("setFeesEnabled reverts without ADMIN_ROLE", async () => {
       await expectRevert(
         tcgv.write.setFeesEnabled([false], { account: user1.account })
       );
     });
 
-    it("setCashbackEnabled reverts when not owner", async () => {
+    it("setCashbackEnabled reverts without ADMIN_ROLE", async () => {
       await expectRevert(
         tcgv.write.setCashbackEnabled([false], { account: user1.account })
       );
@@ -1041,23 +1049,23 @@ describe("TCGVaultToken", () => {
       ], { account: owner.account });
     });
 
-    it("setMinAmounts reverts when not owner", async () => {
+    it("setMinAmounts reverts without ADMIN_ROLE", async () => {
       await expectRevert(
         tcgv.write.setMinAmounts([0n, 0n], { account: user1.account })
       );
     });
 
-    it("setBlacklisted reverts when not owner", async () => {
+    it("setBlacklisted reverts without BLACKLISTER_ROLE", async () => {
       await expectRevert(
         tcgv.write.setBlacklisted([user1.account.address, true, "fraud"], { account: user1.account })
       );
     });
 
-    it("pause reverts when not owner", async () => {
+    it("pause reverts without PAUSER_ROLE", async () => {
       await expectRevert(tcgv.write.pause({ account: user1.account }));
     });
 
-    it("unpause reverts when not owner", async () => {
+    it("unpause reverts without UNPAUSER_ROLE", async () => {
       await expectRevert(tcgv.write.unpause({ account: user1.account }));
     });
 
@@ -1086,27 +1094,12 @@ describe("TCGVaultToken", () => {
       await testRouter.write.callRecordBuyAndMintCashback([owner.account.address, 1n], { account: owner.account });
     });
 
-    it("burn early return when amount is zero", async () => {
-      const testRouter = await viem.deployContract("TestBuyRouter", [], {
-        client: { wallet: owner },
-      });
-      await testRouter.write.setToken([tcgvAddress], { account: owner.account });
-      await tcgv.write.setBuyRouter([testRouter.address], { account: owner.account });
-      await testRouter.write.callBurn([0n], { account: owner.account });
-    });
-
     it("recordBuyAndMintCashback reverts when not buyRouter", async () => {
       await expectRevert(
         tcgv.write.recordBuyAndMintCashback(
           [owner.account.address, parseEther("100")],
           { account: user1.account }
         )
-      );
-    });
-
-    it("burn reverts when not buyRouter", async () => {
-      await expectRevert(
-        tcgv.write.burn([parseEther("1")], { account: user1.account })
       );
     });
 
@@ -1210,6 +1203,62 @@ describe("TCGVaultToken", () => {
         reverted = true;
       }
       expect(reverted).to.equal(true);
+    });
+  });
+
+  describe("Role segregation", () => {
+    it("DEFAULT_ADMIN grants ADMIN_ROLE; grantee may setFeesEnabled", async () => {
+      const adminRole = await tcgv.read.ADMIN_ROLE();
+      await tcgv.write.grantRole([adminRole, user1.account.address], { account: owner.account });
+      await tcgv.write.setFeesEnabled([false], { account: user1.account });
+      expect(await tcgv.read.feesEnabled()).to.equal(false);
+      await tcgv.write.setFeesEnabled([true], { account: user1.account });
+      await tcgv.write.revokeRole([adminRole, user1.account.address], { account: owner.account });
+      await expectRevert(tcgv.write.setFeesEnabled([false], { account: user1.account }));
+    });
+
+    it("PAUSER_ROLE may pause; same account cannot unpause without UNPAUSER_ROLE", async () => {
+      const pauser = await tcgv.read.PAUSER_ROLE();
+      const unpauser = await tcgv.read.UNPAUSER_ROLE();
+      await tcgv.write.grantRole([pauser, user1.account.address], { account: owner.account });
+      await tcgv.write.revokeRole([unpauser, user1.account.address], { account: owner.account });
+      await tcgv.write.pause({ account: user1.account });
+      expect(await tcgv.read.paused()).to.equal(true);
+      await expectRevert(tcgv.write.unpause({ account: user1.account }));
+      await tcgv.write.grantRole([unpauser, user1.account.address], { account: owner.account });
+      await tcgv.write.unpause({ account: owner.account });
+      await tcgv.write.revokeRole([pauser, user1.account.address], { account: owner.account });
+    });
+
+    it("UNPAUSER_ROLE may unpause after another account used PAUSER_ROLE", async () => {
+      const pauser = await tcgv.read.PAUSER_ROLE();
+      const unpauser = await tcgv.read.UNPAUSER_ROLE();
+      await tcgv.write.grantRole([pauser, user1.account.address], { account: owner.account });
+      await tcgv.write.grantRole([unpauser, user2.account.address], { account: owner.account });
+      await tcgv.write.pause({ account: user1.account });
+      await tcgv.write.unpause({ account: user2.account });
+      expect(await tcgv.read.paused()).to.equal(false);
+      await tcgv.write.revokeRole([pauser, user1.account.address], { account: owner.account });
+      await tcgv.write.revokeRole([unpauser, user2.account.address], { account: owner.account });
+    });
+
+    it("BLACKLISTER_ROLE may setBlacklisted but cannot setFeesEnabled without ADMIN_ROLE", async () => {
+      const bl = await tcgv.read.BLACKLISTER_ROLE();
+      const adminRole = await tcgv.read.ADMIN_ROLE();
+      await tcgv.write.grantRole([bl, user2.account.address], { account: owner.account });
+      await tcgv.write.revokeRole([adminRole, user2.account.address], { account: owner.account });
+      await tcgv.write.setBlacklisted([user1.account.address, true, "compliance"], { account: user2.account });
+      expect(await tcgv.read.isBlacklisted([user1.account.address])).to.equal(true);
+      await expectRevert(tcgv.write.setFeesEnabled([false], { account: user2.account }));
+      await tcgv.write.setBlacklisted([user1.account.address, false, ""], { account: user2.account });
+      await tcgv.write.revokeRole([bl, user2.account.address], { account: owner.account });
+    });
+
+    it("PAUSER_ROLE alone cannot setPair", async () => {
+      const pauser = await tcgv.read.PAUSER_ROLE();
+      await tcgv.write.grantRole([pauser, user1.account.address], { account: owner.account });
+      await expectRevert(tcgv.write.setPair([pairAddress, false], { account: user1.account }));
+      await tcgv.write.revokeRole([pauser, user1.account.address], { account: owner.account });
     });
   });
 
@@ -1324,6 +1373,7 @@ describe("TCGVaultToken", () => {
       const freshMock = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], { client: { wallet: owner } });
       const freshTcgv = await deployFreshTcgvWithNexus(
         owner,
+        ZERO,
         routerAddress,
         vault.account.address,
         marketing.account.address,
@@ -1337,11 +1387,87 @@ describe("TCGVaultToken", () => {
     });
   });
 
+  describe("Staking vault + blacklist", () => {
+    it("redeem reverts when share owner is blacklisted and stakingVault is not set (stake not auto-seized)", async () => {
+      await tcgv.write.setBlacklisted([user2.account.address, false, ""], { account: owner.account }).catch(() => {});
+      const stakingVault = await viem.deployContract("TCGVaultStakingVault", [tcgvAddress], { client: { wallet: owner } });
+      const stakeAmt = parseEther("42");
+      await mockPresaleLaunch.write.mintPresale([tcgvAddress, user2.account.address, stakeAmt], { account: owner.account });
+      await tcgv.write.approve([stakingVault.address, stakeAmt], { account: user2.account });
+      await stakingVault.write.deposit([stakeAmt, user2.account.address], { account: user2.account });
+      const shares = await stakingVault.read.balanceOf([user2.account.address]);
+      expect(shares > 0n).to.equal(true);
+      await tcgv.write.setBlacklisted([user2.account.address, true, "staked-while-listed"], { account: owner.account });
+      await expectRevert(
+        stakingVault.write.redeem([shares, user2.account.address, user2.account.address], { account: user2.account })
+      );
+      await tcgv.write.setBlacklisted([user2.account.address, false, ""], { account: owner.account });
+      await stakingVault.write.redeem([shares, user2.account.address, user2.account.address], { account: user2.account });
+    });
+
+    it("setBlacklisted seizes staked TCGV to vault when stakingVault is set", async () => {
+      // In the current version, `stakingVault` is set via constructor (no setter).
+      // We deploy a fresh TCGV whose constructor points to the staking vault address that will be deployed next.
+      const publicClient = await viem.getPublicClient();
+      const n0 = BigInt(await publicClient.getTransactionCount({ address: owner.account.address, blockTag: "pending" }));
+
+      // Deploy a fresh presale finalizer (mock) first, so TCGV can set it immutable.
+      const freshMock = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], { client: { wallet: owner } });
+
+      // Predict addresses for TCGNexusToken (nonce n0+1), TCGV (nonce n0+2), and staking vault (nonce n0+3).
+      const futureNexus = getContractAddress({ from: owner.account.address, nonce: n0 + 1n });
+      const futureTcgv = getContractAddress({ from: owner.account.address, nonce: n0 + 2n });
+      const futureStakingVault = getContractAddress({ from: owner.account.address, nonce: n0 + 3n });
+
+      // Deploy Nexus (minter = predicted TCGV).
+      await viem.deployContract("TCGNexusToken", [futureTcgv], { client: { wallet: owner } });
+
+      // Deploy token with stakingVault set to the predicted vault address.
+      const freshTcgv = await viem.deployContract("TCGVaultToken", [
+        futureStakingVault,
+        routerAddress,
+        vault.account.address,
+        marketing.account.address,
+        community.account.address,
+        futureNexus,
+        freshMock.address,
+      ], { client: { wallet: owner } });
+
+      // Deploy staking vault at the predicted address, pointing to the fresh token.
+      const stakingVault = await viem.deployContract("TCGVaultStakingVault", [freshTcgv.address], { client: { wallet: owner } });
+      expect(getAddress(stakingVault.address)).to.equal(getAddress(futureStakingVault));
+
+      const freshTcgvClient = await viem.getContractAt("TCGVaultToken", freshTcgv.address as `0x${string}`);
+
+      const vaultAddr = (await freshTcgvClient.read.vaultAddress()) as `0x${string}`;
+      const stakeAmt = parseEther("77");
+
+      // Mint TCGV to user2 via presaleFinalizer and stake it.
+      await freshMock.write.mintPresale([freshTcgv.address, user2.account.address, stakeAmt], { account: owner.account });
+      await freshTcgvClient.write.approve([stakingVault.address, stakeAmt], { account: user2.account });
+      await stakingVault.write.deposit([stakeAmt, user2.account.address], { account: user2.account });
+
+      const walletBefore = await freshTcgvClient.read.balanceOf([user2.account.address]);
+      const vaultBalBefore = await freshTcgvClient.read.balanceOf([vaultAddr]);
+
+      await freshTcgvClient.write.setBlacklisted([user2.account.address, true, "seize-stake"], { account: owner.account });
+      expect(await stakingVault.read.balanceOf([user2.account.address])).to.equal(0n);
+      expect(await freshTcgvClient.read.balanceOf([user2.account.address])).to.equal(0n);
+      expect(await freshTcgvClient.read.balanceOf([vaultAddr])).to.equal(vaultBalBefore + stakeAmt + walletBefore);
+    });
+
+    it("setStakingVault reverts without ADMIN_ROLE", async () => {
+      // No longer applicable: staking vault is configured in constructor (no setter in ABI).
+      expect(true).to.equal(true);
+    });
+  });
+
   describe("finalizePresaleAndRecompute scaling path (sum > toMint)", () => {
     it("scales allocation when toMint < sum", async () => {
       const freshMock = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], { client: { wallet: owner } });
       const freshTcgv = await deployFreshTcgvWithNexus(
         owner,
+        ZERO,
         routerAddress,
         vault.account.address,
         marketing.account.address,

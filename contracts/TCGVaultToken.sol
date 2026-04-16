@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.27;
+pragma solidity 0.8.27;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
@@ -7,6 +7,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {IPancakeRouter} from "./interfaces/IPancakeV2.sol";
 import {ITCGNexusToken} from "./interfaces/ITCGNexusToken.sol";
 import {ITCGVaultInitialLaunch} from "./interfaces/ITCGVaultInitialLaunch.sol";
+import {ITCGVaultStakingVault} from "./interfaces/ITCGVaultStakingVault.sol";
 
 /// @notice Pair address cannot be zero.
 error PairZeroAddress();
@@ -41,9 +42,20 @@ error EmptyBlacklistReason();
  * @dev Initial allocation (whitepaper §5): 60% Presale, 20% Liquidité, 4% Team (12mo cliff + 24mo vesting), 16% Ops (5% immediate + 11% over 36mo vesting).
  * @dev Taxe achat (pool / DEX direct — pas le routeur USDC dédié): 6% TCGV: 2% vault, 2% marketing, 2% liquidité (pendingAutolp). Pas de burn sur les frais.
  * @dev Taxe vente (pool): 5% TCGV: 2% vault, 1% marketing, 2% autolp. Cashback NEXUS: 30% prévente, 10% standard (whitepaper §6).
- * @dev Protocol admin is {AccessControl}-DEFAULT_ADMIN_ROLE (granted to deployer).
+ * @dev Access control: {DEFAULT_ADMIN_ROLE} is for granting/revoking roles only. Routine config uses {ADMIN_ROLE}.
+ *      {PAUSER_ROLE} / {UNPAUSER_ROLE} split emergency stop vs resume. {BLACKLISTER_ROLE} manages blacklist.
+ *      Deployer receives all roles at construction; governance can revoke narrow roles from hot wallets.
  */
 contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
+    /// @notice Routine administration: DEX routers, pairs, fee recipients, fee params, buy router, allocation recipients, fee/cashback toggles, min amounts.
+    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+    /// @notice May call pause().
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+    /// @notice May call unpause().
+    bytes32 public constant UNPAUSER_ROLE = keccak256("UNPAUSER_ROLE");
+    /// @notice May call setBlacklisted().
+    bytes32 public constant BLACKLISTER_ROLE = keccak256("BLACKLISTER_ROLE");
+
     /// @notice Hard cap for configurable buy/sell tax rates (25%).
     uint256 public constant MAX_FEE_BP = 2500;
     // Fee parameters (basis points, 10000 = 100%) — pool defaults; owner-modifiable
@@ -78,6 +90,8 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     address private immutable _nexusToken;
     /// @notice When set, buys through this router charge fee in BNB (router path); only this address can call recordBuyAndMintCashback.
     address public buyRouter;
+    /// @notice Optional `TCGVaultStakingVault` over this token; when blacklisting, staked shares are redeemed to `vaultAddress` first.
+    address public immutable stakingVault;
     /// @notice Only this address can call finalizePresaleAndRecompute() and mintPresale(). Set once in constructor.
     address public immutable presaleFinalizer;
     /// @notice True after recomputeSupplyAndBurn has been called (one-time; mints 20% liquidity, 4% team vesting, 5% ops direct, 11% ops vesting).
@@ -166,27 +180,33 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     /// @notice Whitepaper §4.1: TCG-VAULT Token, TCGV, 1 milliard supply, BNB Chain.
     /// @param dexRouter_ Initial Uniswap V2–style router (read-only `factory()`, fee-excluded). Add more via `setDexRouter`; register pools with `setPair`.
     constructor(
+        address stakingVault_,
         address dexRouter_,
-        address _vaultAddress,
-        address _marketingAddress,
-        address _communityAddress,
+        address vaultAddress_,
+        address marketingAddress_,
+        address communityAddress_,
         address nexusToken_,
         address presaleFinalizer_
     ) ERC20("TCG-VAULT Token", "TCGV") {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        if (_vaultAddress == address(0) || _marketingAddress == address(0) || _communityAddress == address(0)) {
+        _grantRole(ADMIN_ROLE, msg.sender);
+        _grantRole(PAUSER_ROLE, msg.sender);
+        _grantRole(UNPAUSER_ROLE, msg.sender);
+        _grantRole(BLACKLISTER_ROLE, msg.sender);
+        if (vaultAddress_ == address(0) || marketingAddress_ == address(0) || communityAddress_ == address(0)) {
             revert ZeroAddress();
         }
         if (nexusToken_ == address(0)) revert ZeroAddress();
         if (dexRouter_ == address(0)) revert ZeroAddress();
         if (presaleFinalizer_ == address(0)) revert ZeroAddress();
-        vaultAddress = _vaultAddress;
-        marketingAddress = _marketingAddress;
-        communityAddress = _communityAddress;
+        vaultAddress = vaultAddress_;
+        marketingAddress = marketingAddress_;
+        communityAddress = communityAddress_;
         _nexusToken = nexusToken_;
         presaleFinalizer = presaleFinalizer_;
+        stakingVault = stakingVault_;
 
-        emit FeeRecipientsUpdated(_vaultAddress, _marketingAddress, _communityAddress);
+        emit FeeRecipientsUpdated(vaultAddress_, marketingAddress_, communityAddress_);
 
         // Exclude the token contract itself so internal accounting transfers (vesting, fee accounting, etc.)
         // do not accidentally trigger buy/sell fee logic.
@@ -223,7 +243,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     /**
      * @notice Register (`active == true`) or remove (`active == false`) a Uniswap V2–style router: stores `factory` from `router.factory()`, fee-excludes the router.
      */
-    function setDexRouter(address router, bool active) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setDexRouter(address router, bool active) external onlyRole(ADMIN_ROLE) {
         _setDexRouter(router, active);
     }
 
@@ -248,7 +268,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
      * @notice Register (`active == true`) or disable (`active == false`) a V2 pool for taxed buys/sells.
      * @dev Fee logic uses only `isPair`. Call after the pool exists. Use one address per pool (e.g. TCGV/USDC).
      */
-    function setPair(address pair, bool active) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setPair(address pair, bool active) external onlyRole(ADMIN_ROLE) {
         if (pair == address(0)) revert PairZeroAddress();
         isPair[pair] = active;
         emit PairActiveUpdated(pair, active);
@@ -261,7 +281,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         address _vaultAddress,
         address _marketingAddress,
         address _communityAddress
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    ) external onlyRole(ADMIN_ROLE) {
         if (_vaultAddress == address(0) || _marketingAddress == address(0) || _communityAddress == address(0)) {
             revert ZeroAddress();
         }
@@ -274,7 +294,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     /**
      * @notice Exclude or include address from fees
      */
-    function setExcludedFromFees(address account, bool excluded) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setExcludedFromFees(address account, bool excluded) external onlyRole(ADMIN_ROLE) {
         isExcludedFromFees[account] = excluded;
         emit ExcludedFromFeesUpdated(account, excluded);
     }
@@ -282,7 +302,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     /**
      * @notice Enable or disable fees
      */
-    function setFeesEnabled(bool _enabled) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setFeesEnabled(bool _enabled) external onlyRole(ADMIN_ROLE) {
         feesEnabled = _enabled;
         emit FeesEnabledUpdated(_enabled);
     }
@@ -290,7 +310,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     /**
      * @notice Enable or disable cashback
      */
-    function setCashbackEnabled(bool _enabled) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setCashbackEnabled(bool _enabled) external onlyRole(ADMIN_ROLE) {
         cashbackEnabled = _enabled;
         emit CashbackEnabledUpdated(_enabled);
     }
@@ -298,21 +318,24 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     /**
      * @notice Set minimum amounts for buy/sell so fee computation is meaningful.
      */
-    function setMinAmounts(uint256 _minBuyAmount, uint256 _minSellAmount) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setMinAmounts(uint256 _minBuyAmount, uint256 _minSellAmount) external onlyRole(ADMIN_ROLE) {
         minBuyAmount = _minBuyAmount;
         minSellAmount = _minSellAmount;
         emit MinAmountsUpdated(_minBuyAmount, _minSellAmount);
     }
 
     /**
-     * @notice Blacklist an address (fraud, market manipulation, Sybil). When enabling, confiscates entire TCGV balance to `vaultAddress` first; blacklisted addresses cannot send nor receive after.
+     * @notice Blacklist an address (fraud, market manipulation, Sybil). When enabling: if `stakingVault` is set, redeems all sTCGV for `account` to `vaultAddress`; then confiscates entire wallet TCGV balance to `vaultAddress`; then sets the flag. Blacklisted addresses cannot send nor receive after.
      */
-    function setBlacklisted(address account, bool status, string calldata reason) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setBlacklisted(address account, bool status, string calldata reason) external onlyRole(BLACKLISTER_ROLE) {
         if (account == address(0)) revert ZeroAddress();
         bytes memory reasonBytes = bytes(reason);
         if (status && reasonBytes.length == 0) revert EmptyBlacklistReason();
         bytes32 reasonHash = reasonBytes.length == 0 ? bytes32(0) : keccak256(reasonBytes);
         if (status) {
+            if (stakingVault != address(0)) {
+                ITCGVaultStakingVault(stakingVault).forceWithdrawFromBlacklist(account);
+            }
             uint256 bal = balanceOf(account);
             if (bal > 0 && account != vaultAddress) {
                 // Direct balance move: bypass fees, blacklist, and pause checks in this contract's _update.
@@ -327,7 +350,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     /**
      * @notice Pause all transfers (emergency security). When paused, buy/sell/transfer/mintPresale (via _update) are blocked.
      */
-    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function pause() external onlyRole(PAUSER_ROLE) {
         paused = true;
         emit Paused(msg.sender);
     }
@@ -335,7 +358,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     /**
      * @notice Unpause the contract.
      */
-    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function unpause() external onlyRole(UNPAUSER_ROLE) {
         paused = false;
         emit Unpaused(msg.sender);
     }
@@ -349,7 +372,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         uint256 vaultShareBp,
         uint256 marketingShareBp,
         uint256 autolpShareBp
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    ) external onlyRole(ADMIN_ROLE) {
         if (buyTaxBp > MAX_FEE_BP) revert InvalidFeeParams();
         if (vaultShareBp + marketingShareBp + autolpShareBp != 10000) revert InvalidFeeParams();
         BUY_TAX = buyTaxBp;
@@ -369,7 +392,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         uint256 autolpShareBp,
         uint256 marketingShareBp,
         uint256 communityShareBp
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    ) external onlyRole(ADMIN_ROLE) {
         if (sellTaxBp > MAX_FEE_BP) revert InvalidFeeParams();
         if (vaultShareBp + autolpShareBp + marketingShareBp + communityShareBp != 10000) {
             revert InvalidFeeParams();
@@ -391,7 +414,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     /**
      * @notice Set recipients for post-presale mint (whitepaper §5: 20% liquidity, 4% team vesting, 16% ops). Must be set before finalizePresaleAndRecompute().
      */
-    function setAllocationRecipients(address _liquidity, address _team, address _ops) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setAllocationRecipients(address _liquidity, address _team, address _ops) external onlyRole(ADMIN_ROLE) {
         liquidityRecipient = _liquidity;
         teamRecipient = _team;
         opsRecipient = _ops;
@@ -529,7 +552,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     /**
      * @notice Set the buy router (fee in BNB path). Only this contract can call recordBuyAndMintCashback.
      */
-    function setBuyRouter(address _buyRouter) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setBuyRouter(address _buyRouter) external onlyRole(ADMIN_ROLE) {
         address previous = buyRouter;
         if (previous != address(0) && previous != _buyRouter) {
             isExcludedFromFees[previous] = false;
@@ -553,16 +576,6 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         if (cashbackAmount == 0) return;
         ITCGNexusToken(_nexusToken).mintCashback(recipient, cashbackAmount);
         emit CashbackDistributed(recipient, cashbackAmount);
-    }
-
-    /**
-     * @notice Burn TCGV from caller. Only callable by buyRouter.
-     * @dev Burns from msg.sender (router) so router does not need to transfer first — saves gas.
-     */
-    function burn(uint256 amount) external {
-        if (msg.sender != buyRouter) revert OnlyBuyRouter();
-        if (amount == 0) return;
-        _burn(msg.sender, amount);
     }
 
     /**

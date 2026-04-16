@@ -42,7 +42,7 @@
  */
 
 import hre from "hardhat";
-import { formatEther, getContractAddress, parseEther, type Address } from "viem";
+import { formatEther, getContractAddress, parseEther, type Address, zeroAddress } from "viem";
 import { execSync, spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -287,6 +287,7 @@ async function main() {
   await deployTracked(
     "TCGVaultToken",
     [
+      zeroAddress,
       PANCAKE_ROUTER_TESTNET,
       vaultAddr,
       marketingAddr,
@@ -301,6 +302,7 @@ async function main() {
   verifyJobs.push({
     address: tokenAddress,
     constructorArguments: [
+      zeroAddress,
       PANCAKE_ROUTER_TESTNET,
       vaultAddr,
       marketingAddr,
@@ -407,6 +409,7 @@ async function main() {
   h = await token.write.setExcludedFromFees([stakingVaultAddress, true], { account: deployer.account });
   await waitForTxReceipt(h);
   console.log("token.setExcludedFromFees(stakingVault) ✓ (deposits are full-amount)");
+  console.log("Note: TCGV staking vault is now configured via the TCGVaultToken constructor (no on-chain setter).");
   console.log();
 
   console.log("--- BuyRouter + Liquidity wrapper ---");

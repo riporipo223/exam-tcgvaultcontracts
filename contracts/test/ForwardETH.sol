@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.27;
+pragma solidity 0.8.27;
 
 /// @notice Minimal contract that receives ETH and forwards it to a target. Used to test TCGVaultLiquidityWrapper.receive() (msg.sender must be allowed router).
 contract ForwardETH {

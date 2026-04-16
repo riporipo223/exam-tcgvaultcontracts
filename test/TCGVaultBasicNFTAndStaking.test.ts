@@ -23,7 +23,7 @@ describe("TCGVaultBasicNFT + StakingVault", () => {
   let owner: Awaited<ReturnType<typeof viem.getWalletClients>>[0];
   let user1: Awaited<ReturnType<typeof viem.getWalletClients>>[0];
   let user2: Awaited<ReturnType<typeof viem.getWalletClients>>[0];
-  let tcgv: ContractReturnType<"MockWETH">;
+  let tcgv: ContractReturnType<"contracts/test/MockTCGVStakingAsset.sol:MockTCGVStakingAsset">;
   let stakingVault: ContractReturnType<"TCGVaultStakingVault">;
   let basicNFT: ContractReturnType<"TCGVaultBasicNFT">;
 
@@ -32,10 +32,11 @@ describe("TCGVaultBasicNFT + StakingVault", () => {
   before(async () => {
     [owner, user1, user2] = await viem.getWalletClients();
 
-    const mockTcgv = await viem.deployContract("MockWETH", [], { client: { wallet: owner } });
+    const mockTcgv = await viem.deployContract("contracts/test/MockTCGVStakingAsset.sol:MockTCGVStakingAsset", [
+      owner.account.address,
+    ], { client: { wallet: owner } });
     const tcgvAddress = mockTcgv.address;
-    tcgv = await viem.getContractAt("MockWETH", tcgvAddress);
-    await tcgv.write.deposit({ value: parseEther("1000"), account: owner.account });
+    tcgv = await viem.getContractAt("contracts/test/MockTCGVStakingAsset.sol:MockTCGVStakingAsset", tcgvAddress);
     await tcgv.write.transfer([user1.account.address, parseEther("500")], { account: owner.account });
 
     stakingVault = await viem.deployContract("TCGVaultStakingVault", [tcgvAddress], { client: { wallet: owner } });
@@ -84,6 +85,20 @@ describe("TCGVaultBasicNFT + StakingVault", () => {
       expect(shares > 0n).to.equal(true);
       await stakingVault.write.redeem([shares, user1.account.address, user1.account.address], { account: user1.account });
       expect(await stakingVault.read.balanceOf([user1.account.address])).to.equal(0n);
+    });
+
+    it("redeem reverts when share owner is blacklisted on underlying asset", async () => {
+      const depositAmount = parseEther("40");
+      await tcgv.write.transfer([user2.account.address, depositAmount], { account: owner.account });
+      await tcgv.write.approve([stakingVault.address, depositAmount], { account: user2.account });
+      await stakingVault.write.deposit([depositAmount, user2.account.address], { account: user2.account });
+      const shares = await stakingVault.read.balanceOf([user2.account.address]);
+      await tcgv.write.setBlacklisted([user2.account.address, true], { account: owner.account });
+      await expectRevert(
+        stakingVault.write.redeem([shares, user2.account.address, user2.account.address], { account: user2.account })
+      );
+      await tcgv.write.setBlacklisted([user2.account.address, false], { account: owner.account });
+      await stakingVault.write.redeem([shares, user2.account.address, user2.account.address], { account: user2.account });
     });
   });
 

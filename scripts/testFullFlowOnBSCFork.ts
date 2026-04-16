@@ -276,6 +276,7 @@ async function main() {
   nonce += 1n;
 
   await viem.deployContract("TCGVaultToken", [
+    ZERO,
     PANCAKE_ROUTER,
     vaultAddr,
     marketingAddr,

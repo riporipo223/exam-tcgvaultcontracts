@@ -51,6 +51,7 @@ async function main() {
   await vault.write.setMinStakeForBasicNFT([minShares], { account: deployer.account });
   await vault.write.setBasicNFTContract([basicNFT.address], { account: deployer.account });
   console.log("Min stake for Basic NFT set (5000 TCGV)");
+  console.log("Note: TCGV staking vault is now configured via the TCGVaultToken constructor (no on-chain setter).");
 
   const founderNFT = await viem.deployContract(
     "TCGVaultFounderNFT",

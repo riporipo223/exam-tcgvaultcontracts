@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.27;
+pragma solidity 0.8.27;
 
 interface ITCGVaultToken {
     function recordBuyAndMintCashback(address recipient, uint256 tcgvAmount) external;
-    function burn(uint256 amount) external;
 }
 
 /**
- * Test helper: acts as buyRouter to cover TCGVaultToken recordBuyAndMintCashback / burn branches.
+ * @notice Test helper: acts as buyRouter to cover TCGVaultToken recordBuyAndMintCashback.
  */
 contract TestBuyRouter {
     ITCGVaultToken public token;
@@ -18,9 +17,5 @@ contract TestBuyRouter {
 
     function callRecordBuyAndMintCashback(address recipient, uint256 tcgvAmount) external {
         token.recordBuyAndMintCashback(recipient, tcgvAmount);
-    }
-
-    function callBurn(uint256 amount) external {
-        token.burn(amount);
     }
 }

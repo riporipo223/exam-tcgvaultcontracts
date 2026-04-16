@@ -1,33 +1,49 @@
 # TCG Vault Token Contracts
 
-This directory contains the ERC20 token contracts for the TCG Vault ecosystem.
+This directory contains the ERC20 token contracts for the TCG Vault ecosystem and **technical documentation** for integrators and auditors.
+
+## Documentation in this folder
+
+| File | Purpose |
+|------|---------|
+| [**README.md**](README.md) (this file) | Contract overview, deployment order, operational notes, events, admin entrypoints summary. |
+| [**FEE_REFERENCE.md**](FEE_REFERENCE.md) | Fee defaults, formulas, mutability, and roles (direct pool vs USDC router). |
+| [**PRODUCT_LIFECYCLE.md**](PRODUCT_LIFECYCLE.md) | Product phases as implemented (Founder NFT, Initial Launch, trading, staking). |
+| [**IMPLEMENTATION_NOTES_FR.md**](IMPLEMENTATION_NOTES_FR.md) | French: same implementation facts (fees, presale, NFTs). |
+| [**WALLET_ADDRESSES.md**](WALLET_ADDRESSES.md) | `.env` variable ↔ wallet role mapping for deploy scripts. |
+
+---
 
 ## Contracts
 
 ### TCGVaultToken.sol (TCGV)
-Token A — le Moteur économique (whitepaper §4.1). BNB Chain, 1 milliard supply.
+Token A — economic engine. BNB Chain, 1 milliard supply (fixed in contract).
 
-**Features (whitepaper §5.1, §5.2):**
-- **Direct pair (PancakeSwap):** Buy tax 15% in TCGV (10% Vault, 3% Marketing, 2% burn) + 10% NEXUS cashback. Sell tax 10% in TCGV.
-- **Router path (TCGVaultBuyRouter):** Buy fee 13% **in BNB** (10% vault, 3% marketing); 2% of TCGV received is burned; user gets rest + 10% NEXUS cashback.
-- Auto-LP and auto-burn on sells.
+**Features:**
+- **Direct pair (PancakeSwap / V2 pool):** Buy tax **6%** in TCGV (`BUY_TAX = 600`): **⅓** vault, **⅓** marketing, **⅓** `pendingAutolp` (liquidity accrual). No TCGV burn on that fee. NEXUS cashback **30%** of buy amount while presale is active, **10%** after (`TCGVaultToken` presale flag).
+- **Direct pair sell:** **5%** in TCGV (`SELL_TAX = 500`), split **40%** vault, **40%** autolp (`pendingAutolp`), **20%** marketing, **0%** community — relative to the fee slice (i.e. **2% / 2% / 1%** of notional). No supply burn on sell fee distribution.
+- **`pendingAutolp` / `executePendingAutolp`:** Part of buy/sell fees accrues for liquidity operations; this is not a supply burn.
 
 ### TCGNexusToken.sol (NEXUS)
-Jeton de Cœur — gouvernance et appartenance (whitepaper §5.5).
+Soulbound governance / membership token.
 
 **Features:**
 - Soulbound (non transférable): no transfers between accounts; mint and burn only
 - Minter = TCGVaultToken only, set at deployment (immutable)
-- Obtained via 10% cashback on TCGV purchase; owner can mint for presale/initial distribution
+- Obtained via cashback on TCGV purchase; owner can mint for presale/initial distribution
 
 ### TCGVaultBuyRouter.sol
-**Buy TCGV with BNB through this contract: fee is charged in BNB.** User sends BNB; 13% is taken in BNB (10% vault, 3% marketing); the rest is swapped for TCGV via PancakeSwap. 2% of TCGV received is burned. User receives the remaining TCGV + 10% NEXUS cashback. Uses transient storage so the pair→router TCGV transfer is not taxed (fee already taken in BNB).
+**Buy TCGV with USDC** (stablecoin path). Default **5%** of USDC in prior to swap (**300** + **200** + **0** bps → vault / marketing / community); remaining USDC is swapped; **100%** of TCGV out goes to the buyer (no TCGV burn). NEXUS cashback uses `TCGVaultToken` rules (30% / 10% of **TCGV** buy amount). Transient storage avoids double-taxing the router leg on `TCGVaultToken`.
+
+**Sell (`sellTCGVForUSDC`):** default **4%** of **USDC received** (`sellTaxBp = 400`), split **3750 / 2500 / 1250 / 2500** bps of the fee amount → vault / autolp / marketing / community (**1.5% / 1% / 0.5% / 1%** of USDC notional). No TCGV burn on input; router is fee-excluded on the token.
+
+Full tables, getters, and caps: [**FEE_REFERENCE.md**](FEE_REFERENCE.md).
 
 ### TCGVaultLiquidityWrapper.sol
-Use for **adding/removing liquidity** so TCGV does **not** charge fees on those transfers (whitepaper: no fees on LP supply/remove). Sets transient storage (EIP-1153) before calling the DEX router; TCGVaultToken skips fees when this slot is set. Requires **Cancun** (or later) hardfork for `tstore`/`tload`.
+Use for **adding/removing liquidity** so TCGV does **not** charge fees on those transfers. Sets transient storage (EIP-1153) before calling the DEX router; `TCGVaultToken` skips fees when this slot is set. Requires **Cancun** (or later) hardfork for `tstore`/`tload`.
 
-### Whitepaper NFTs (separate from these contracts)
-The whitepaper §7 describes **Founder Edition** NFTs (500) and **Édition basique** (staking 25$ TCGV). Those are separate NFT contracts and are not part of this repo; these contracts only implement TCGV and NEXUS tokens.
+### Other contracts in this repo
+Founder NFT (`TCGVaultFounderNFT`), Initial Launch / presale (`TCGVaultInitialLaunch`), staking + Basic NFT (`TCGVaultStakingVault`, `TCGVaultBasicNFT`), converter, and TCGR are under `contracts/`; see [**PRODUCT_LIFECYCLE.md**](PRODUCT_LIFECYCLE.md).
 
 ## Deployment Steps
 
@@ -38,7 +54,7 @@ NEXUS is **immutable** on `TCGVaultToken` (constructor arg). `TCGNexusToken` nee
    TCGNexusToken nexusToken = new TCGNexusToken(predictedTCGVAddress);
    ```
 
-2. **Deploy TCGVaultToken** with `nexusToken = address(nexusToken)` (must match the address from step 1). Name, symbol and supply are fixed in contract (whitepaper).
+2. **Deploy TCGVaultToken** with `nexusToken = address(nexusToken)` (must match the address from step 1). Name, symbol and supply are fixed in the contract.
    ```solidity
    TCGVaultToken token = new TCGVaultToken(
        dexRouterAddress,
@@ -65,7 +81,7 @@ NEXUS is **immutable** on `TCGVaultToken` (constructor arg). `TCGNexusToken` nee
    );
    token.setBuyRouter(address(buyRouter));
    ```
-   Users who buy via `buyTCGVWithUSDC` follow the router’s USDC fee + swap + burn + NEXUS cashback rules (see `TCGVaultBuyRouter` comments).
+   Users who buy via `buyTCGVWithUSDC` pay the router’s **USDC** fee, receive **100%** of swapped TCGV (no burn), and get NEXUS cashback per token rules.
 
 ### BSC Testnet (chainId 97)
 
@@ -74,18 +90,13 @@ Script: `yarn deploy:bsctest` → `scripts/deployBscTestnet.ts` on Hardhat netwo
 - PancakeSwap V2 testnet **factory** `0x6725F303b657a9451d8BA641348b6761A6CC7a17`, **router** `0xD99D1c33F9fC3444f8101754aBC46c52416550D1` — see [Pancake docs](https://developer.pancakeswap.finance/contracts/v2/addresses).
 - **USDC:** BSC testnet has no single canonical Circle USDC. The script deploys **`MockUSDC`** (6 decimals, open `mint`) unless you set **`USDC_ADDRESS`** to an existing token.
 
-## Fee Structure
+## Fee structure
 
-### Buy Tax
-- **Direct (PancakeSwap):** 15% in TCGV (10% vault, 3% marketing, 2% burn) + 10% NEXUS cashback.
-- **BuyRouter (BNB path):** 13% in BNB (10% vault, 3% marketing), 2% of TCGV received burned, + 10% NEXUS cashback.
+Authoritative detail: [**FEE_REFERENCE.md**](FEE_REFERENCE.md).
 
-### Sell Tax (10%)
-- **4%** → Vault Consolidation
-- **3%** → Auto-LP (liquidity pool)
-- **1%** → Marketing & Structure
-- **1%** → Community Rewards
-- **1%** → Auto-burn
+**`TCGVaultToken` (direct pool):** default buy **6%** (`BUY_TAX = 600`) with shares **3333 / 3333 / 3334**; default sell **5%** (`SELL_TAX = 500`) with shares **4000 / 4000 / 2000 / 0**. No fee-driven supply burn on these paths. **`ADMIN_ROLE`** may update params via `setBuyFeeParams` / `setSellFeeParams` (shares sum to **10_000**; tax ≤ **`MAX_FEE_BP = 2500`**).
+
+**`TCGVaultBuyRouter` (USDC):** default buy fee **5%** of USDC in (**300** + **200** + **0** bps); default sell **4%** of USDC out with share split **3750 / 2500 / 1250 / 2500** on the fee. No TCGV burn on router buy. Owner may call `setBuyFeeParams` / `setSellFeeParams` subject to **`MAX_FEE_BP`**.
 
 ## Important Notes
 
@@ -93,32 +104,44 @@ Script: `yarn deploy:bsctest` → `scripts/deployBscTestnet.ts` on Hardhat netwo
 
 2. **DEX routers:** The constructor registers one V2-style router (`dexFactoryForRouter[router] = router.factory()`). Add or remove more with `setDexRouter(router, active)` (emits `DexRouterUpdated`). Registered routers are fee-excluded. Taxed swaps are still driven by `isPair`, not by this mapping.
 
-3. **Cashback:** 10% cashback in NEXUS on buy only (whitepaper: la vente ne génère pas de Cashback). NEXUS is Soulbound. TCGNexusToken’s minter is set at deployment to TCGVaultToken and is immutable (no setter).
+3. **Cashback:** NEXUS cashback on **buys** only (30% presale / 10% after finalize — see `TCGVaultToken`). NEXUS is soulbound. `TCGNexusToken`’s minter is set at deployment to `TCGVaultToken` and is immutable (no setter).
 
-4. **Auto-LP:** On sells, 3% of the fee is automatically added to the liquidity pool. This requires ETH to be sent to the contract (can happen automatically via swap fees or manually).
+4. **Autolp:** Portions of buy/sell fees increase `pendingAutolp`; operators call `executePendingAutolp` when adding liquidity (see token NatSpec). This accrual is not a circulating-supply burn.
 
-5. **Minimum amounts:** Buy and sell transfers below `minBuyAmount` / `minSellAmount` revert with `MinAmountNotMet` so fee computation is always meaningful. Owner can set these via `setMinAmounts`. Default is 10_000 (wei).
+5. **Minimum amounts:** Buy and sell transfers below `minBuyAmount` / `minSellAmount` revert with `MinAmountNotMet`. **`ADMIN_ROLE`** can set these via `setMinAmounts`. Default is **10_000** (wei).
 
-6. **Exclusions:** The token contract itself and the initial DEX router are excluded from fees by default; more routers added via `setDexRouter` are excluded too. Other addresses via `setExcludedFromFees` (including the owner if you choose to set it explicitly).
+6. **Exclusions:** The token contract itself and the initial DEX router are excluded from fees by default; more routers added via `setDexRouter` are excluded too. Other addresses via `setExcludedFromFees` (including the deployer if you set it explicitly).
 
 ## Security Considerations
 
-- The contract uses ReentrancyGuard for sell operations
-- Owner can pause fees via `setFeesEnabled(false)`
-- Emergency withdraw function available for owner
-- All fee percentages are constants and cannot be changed after deployment
+- The token uses `ReentrancyGuard` for sell operations; the buy router uses transient reentrancy protection.
+- **`ADMIN_ROLE`** can toggle fees via `setFeesEnabled`; pause / unpause use **`PAUSER_ROLE`** / **`UNPAUSER_ROLE`**; blacklist uses **`BLACKLISTER_ROLE`**. **`DEFAULT_ADMIN_ROLE`** is intended for granting/revoking those roles only (deployer holds all roles at construction).
+- Fee **rates and splits** are **governable** within caps (`MAX_FEE_BP = 2500` on token and router). Read on-chain values when integrating.
+- Emergency patterns (pause, blacklist) are documented in the Solidity files.
 
 ## Functions
 
-### Admin functions (`DEFAULT_ADMIN_ROLE`, granted to deployer)
-- `setDexRouter(address, bool)` - Register another V2 router (stores `factory()`, fee-excludes it) or remove one (`DexRouterUpdated`)
-- `setPair(address, bool)` - Register or disable a V2 pool for buy/sell fee logic (`PairActiveUpdated`)
-- `setAddresses(vault, marketing, community)` - Update vault / marketing / community fee recipients; emits `FeeRecipientsUpdated` (**NEXUS address is not updatable**)
-- `setExcludedFromFees(address, bool)` - Exclude/include addresses from fees (emits `ExcludedFromFeesUpdated`; constructor also emits for deployer, token, and DEX router; `setBuyRouter` emits when router is non-zero)
-- `setFeesEnabled(bool)` - Enable/disable fees
-- `setCashbackEnabled(bool)` - Enable/disable cashback
-- `setMinAmounts(uint256, uint256)` - Set minimum buy/sell amounts for fee computation  
-- Use OpenZeppelin `AccessControl` `grantRole` / `revokeRole` if you add custom roles later; transfer admin with `grantRole` + `revokeRole` on `DEFAULT_ADMIN_ROLE`.
+### `DEFAULT_ADMIN_ROLE` (role admin only)
+- `grantRole` / `revokeRole` for `ADMIN_ROLE`, `PAUSER_ROLE`, `UNPAUSER_ROLE`, `BLACKLISTER_ROLE` (OpenZeppelin `AccessControl`).
+
+### `ADMIN_ROLE` (routine configuration)
+- `setDexRouter(address, bool)` — Register another V2 router (stores `factory()`, fee-excludes it) or remove one (`DexRouterUpdated`)
+- `setPair(address, bool)` — Register or disable a V2 pool for buy/sell fee logic (`PairActiveUpdated`)
+- `setAddresses(vault, marketing, community)` — Update vault / marketing / community fee recipients; emits `FeeRecipientsUpdated` (**NEXUS address is not updatable**)
+- `setExcludedFromFees(address, bool)` — Exclude/include addresses from fees (emits `ExcludedFromFeesUpdated`; constructor also emits for deployer, token, and DEX router; `setBuyRouter` emits when router is non-zero)
+- `setFeesEnabled(bool)` — Enable/disable fees
+- `setCashbackEnabled(bool)` — Enable/disable cashback
+- `setMinAmounts(uint256, uint256)` — Set minimum buy/sell amounts for fee computation
+- `setBuyFeeParams` / `setSellFeeParams` — Update direct pool tax bps and recipient splits (within `MAX_FEE_BP`, shares sum to 10_000)
+- `setAllocationRecipients` — Liquidity / team / ops recipients required before supply recompute
+- `setBuyRouter` — Wire `TCGVaultBuyRouter` (zero address clears)
+- `setStakingVault` — Optional `TCGVaultStakingVault`; when set, `setBlacklisted(..., true)` redeems that account’s sTCGV to `vaultAddress` before seizing wallet TCGV
+
+### `PAUSER_ROLE` / `UNPAUSER_ROLE`
+- `pause` / `unpause` respectively.
+
+### `BLACKLISTER_ROLE`
+- `setBlacklisted` — Enable/disable blacklist with required reason string when enabling.
 
 ### Public Functions
 - Standard ERC20 functions (transfer, approve, etc.)
@@ -131,4 +154,4 @@ Notable events: `FeeRecipientsUpdated`, `MinAmountsUpdated`, `FeesEnabledUpdated
 
 - `FeesDistributed` — Buy/sell fee splits applied
 - `CashbackDistributed` — NEXUS cashback minted
-- `LiquidityAdded` — Legacy / documentation hook (if used)
+- `LiquidityAdded` — Optional integration hook if used

@@ -196,6 +196,7 @@ async function main() {
 
   console.log("1.3 Deploying TCGVaultToken (immutable NEXUS + immutable presaleFinalizer)...");
   await viem.deployContract("TCGVaultToken", [
+    ZERO,
     PANCAKE_ROUTER,
     vaultAddr,
     marketingAddr,

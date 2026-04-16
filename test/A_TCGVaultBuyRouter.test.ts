@@ -4,7 +4,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import hre from "hardhat";
-import { parseEther, parseUnits, getContractAddress } from "viem";
+import { parseEther, parseUnits, getContractAddress, zeroAddress } from "viem";
 
 const { viem, networkHelpers } = await hre.network.connect();
 
@@ -37,6 +37,7 @@ async function deployFixture() {
 
   await viem.deployContract("TCGNexusToken", [futureTcgv], { client: { wallet: owner } });
   const tcgvContract = await viem.deployContract("TCGVaultToken", [
+    zeroAddress,
     routerAddress,
     vault.account.address,
     marketing.account.address,
