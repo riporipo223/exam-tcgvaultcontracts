@@ -273,14 +273,14 @@ async function main() {
 
   console.log("--- Core (CREATE2-style nonce prediction) ---");
 
-  await deployTracked("contracts/TCGNexusToken.sol:TCGNexusToken", [tokenAddress], {
+  await deployTracked("contracts/TCGNexusToken.sol:TCGNexusToken", [tokenAddress, founderNFTAddress, initialLaunchAddress], {
     client: { wallet: deployer },
   });
   nonce += 1n;
   console.log("TCGNexusToken:", nexusTokenAddress);
   verifyJobs.push({
     address: nexusTokenAddress,
-    constructorArguments: [tokenAddress],
+    constructorArguments: [tokenAddress, founderNFTAddress, initialLaunchAddress],
     contract: "contracts/TCGNexusToken.sol:TCGNexusToken",
   });
 
@@ -362,11 +362,7 @@ async function main() {
   await waitForTxReceipt(setAllocHash);
   console.log("token.setAllocationRecipients ✓");
 
-  let h = await nexusToken.write.setPresaleMinter([founderNFTAddress, true], { account: deployer.account });
-  await waitForTxReceipt(h);
-  h = await nexusToken.write.setPresaleMinter([initialLaunchAddress, true], { account: deployer.account });
-  await waitForTxReceipt(h);
-  console.log("Nexus presale minters: FounderNFT + InitialLaunch");
+  console.log("Nexus presale bonus minters (immutable): FounderNFT + InitialLaunch");
   console.log();
 
   console.log("--- Staking vault + Basic NFT (ERC-4626 + soulbound gate) ---");

@@ -12,13 +12,13 @@ import {Nonces} from "@openzeppelin/contracts/utils/Nonces.sol";
  * @notice Jeton de Cœur — gouvernance et appartenance à la Guilde TCG-VAULT (whitepaper §4, §5).
  * @dev Soulbound (non transférable). Droit de vote : participation aux décisions d'acquisition du Vault.
  *      ERC-5805 / ERC20Votes for Tally.xyz and OZ Governor compatibility. EIP712 via ERC20Permit for delegateBySig.
- *      Obtention : cashback TCGV (minter) + bonus 30% prévente (allowedPresaleMinters).
+ *      Obtention : cashback TCGV (minter) + bonus 30% prévente (immutable FounderNFT + InitialLaunch only).
  */
 contract TCGNexusToken is ERC20Permit, ERC20Votes, Ownable {
     /// @notice Minter can only be the TCGVaultToken contract.
     error OnlyMinter();
-    /// @notice Caller not allowed to mint presale bonus.
-    error OnlyPresaleMinter();
+    /// @notice Caller is neither FounderNFT nor InitialLaunch presale bonus contract.
+    error OnlyPresaleBonusContract();
     /// @notice Recipient cannot be the zero address.
     error ZeroAddress();
     /// @notice Amount must be greater than zero.
@@ -28,31 +28,50 @@ contract TCGNexusToken is ERC20Permit, ERC20Votes, Ownable {
 
     /// @notice TCGVaultToken contract; only it can mint cashback. Set at deployment, immutable.
     address private immutable _minter;
-    /// @notice Contracts allowed to mint 30% NEXUS during presale (Founder NFT, Initial Launch).
-    mapping(address => bool) private _allowedPresaleMinters;
+    /// @notice Only these contracts may mint/burn the 30% presale NEXUS bonus (whitepaper §6, §7). Immutable.
+    address private immutable _founderNFTPresaleBonus;
+    address private immutable _initialLaunchPresaleBonus;
 
     // External getters (private/external pattern)
     function minter() external view returns (address) {
         return _minter;
     }
 
-    function allowedPresaleMinters(address account) external view returns (bool) {
-        return _allowedPresaleMinters[account];
+    function founderNFTPresaleBonus() external view returns (address) {
+        return _founderNFTPresaleBonus;
+    }
+
+    function initialLaunchPresaleBonus() external view returns (address) {
+        return _initialLaunchPresaleBonus;
+    }
+
+    function isPresaleBonusContract(address account) external view returns (bool) {
+        return account == _founderNFTPresaleBonus || account == _initialLaunchPresaleBonus;
     }
 
     event CashbackMinted(address recipient, uint256 amount);
     event PresaleBonusMinted(address recipient, uint256 amount);
-    event PresaleMinterUpdated(address account, bool allowed);
     event OwnerMinted(address to, uint256 amount);
     event PresaleBonusClawedBack(address holder, uint256 amount);
-    constructor(address minter_) ERC20("TCG-NEXUS", "NEXUS") ERC20Permit("TCG-NEXUS") Ownable(msg.sender) {
+
+    constructor(
+        address minter_,
+        address founderNFTPresaleBonus_,
+        address initialLaunchPresaleBonus_
+    ) ERC20("TCG-NEXUS", "NEXUS") ERC20Permit("TCG-NEXUS") Ownable(msg.sender) {
         if (minter_ == address(0)) revert ZeroAddress();
+        if (founderNFTPresaleBonus_ == address(0)) revert ZeroAddress();
+        if (initialLaunchPresaleBonus_ == address(0)) revert ZeroAddress();
         _minter = minter_;
+        _founderNFTPresaleBonus = founderNFTPresaleBonus_;
+        _initialLaunchPresaleBonus = initialLaunchPresaleBonus_;
     }
 
-    function setPresaleMinter(address account, bool allowed) external onlyOwner {
-        _allowedPresaleMinters[account] = allowed;
-        emit PresaleMinterUpdated(account, allowed);
+    modifier onlyPresaleBonusContract() {
+        if (msg.sender != _founderNFTPresaleBonus && msg.sender != _initialLaunchPresaleBonus) {
+            revert OnlyPresaleBonusContract();
+        }
+        _;
     }
 
     /// @dev Resolve nonces() conflict between ERC20Permit and Votes (both use Nonces).
@@ -83,10 +102,9 @@ contract TCGNexusToken is ERC20Permit, ERC20Votes, Ownable {
 
     /**
      * @notice Mint 30% NEXUS bonus during presale (whitepaper §6, §7).
-     * @dev Access: only addresses in allowedPresaleMinters (set via setPresaleMinter by owner).
+     * @dev Access: immutable FounderNFT or InitialLaunch only.
      */
-    function mintPresaleBonus(address recipient, uint256 amount) external {
-        if (!_allowedPresaleMinters[msg.sender]) revert OnlyPresaleMinter();
+    function mintPresaleBonus(address recipient, uint256 amount) external onlyPresaleBonusContract {
         if (recipient == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
         _mint(recipient, amount);
@@ -94,24 +112,13 @@ contract TCGNexusToken is ERC20Permit, ERC20Votes, Ownable {
     }
 
     /**
-     * @notice Burn presale bonus from a holder.
-     * @dev Used to enforce MiCA cooling-off cancellations.
-     *      Access: presale minters only (FounderNFT + InitialLaunch).
+     * @notice Claw back presale bonus from a holder (MiCA cooling-off cancellations).
+     * @dev Access: immutable FounderNFT or InitialLaunch only.
      */
-    function burnPresaleBonus(address holder, uint256 amount) external {
-        if (!_allowedPresaleMinters[msg.sender]) revert OnlyPresaleMinter();
+    function clawBackPresaleBonus(address holder, uint256 amount) external onlyPresaleBonusContract {
         if (holder == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
         _burn(holder, amount);
         emit PresaleBonusClawedBack(holder, amount);
-    }
-
-    /**
-     * @notice Mint tokens (only owner, for airdrops or community).
-     */
-    function mint(address to, uint256 amount) external onlyOwner {
-        if (to == address(0)) revert ZeroAddress();
-        _mint(to, amount);
-        emit OwnerMinted(to, amount);
     }
 }

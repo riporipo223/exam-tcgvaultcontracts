@@ -117,13 +117,15 @@ contract TCGRToken is ERC20, Ownable {
     }
 
     /**
-     * @notice Burn TCGR from an account. Only callable by the converter contract (when user converts TCGR → TCGV).
+     * @notice Burn TCGR from `account` for TCGR→TCGV conversion.
+     * @dev Only the converter may call. `account` must have approved the converter for at least `amount` (standard ERC-20 allowance to the converter contract).
      */
-    function burnFrom(address account, uint256 amount) external {
+    function burnForConversion(address account, uint256 amount) external {
         if (msg.sender != _converter) revert OnlyConverter();
         if (account == address(0)) revert ZeroAddress();
         if (amount == 0) return;
         if (balanceOf(account) < amount) revert InsufficientBalance();
+        _spendAllowance(account, msg.sender, amount);
         _burn(account, amount);
         emit Converted(account, amount);
     }

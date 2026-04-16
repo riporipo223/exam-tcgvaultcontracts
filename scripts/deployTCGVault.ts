@@ -71,6 +71,7 @@ async function runQueuedVerifications(jobs: VerifyJob[]): Promise<void> {
  *   - COMMUNITY_ADDRESS: Community rewards address (required)
  *   - STABLECOIN_ADDRESS: Stablecoin address (USDT/USDC). If omitted, deploy MockUSDC.
  *   - PRESALE_FINALIZER: Address allowed to call mintPresale / finalize (e.g. TCGVaultInitialLaunch) (required)
+ *   - NEXUS_PRESALE_BONUS_FOUNDER_NFT, NEXUS_PRESALE_BONUS_INITIAL_LAUNCH: Immutable NEXUS presale bonus contracts (CREATE-predicted addresses) (required)
  *   - MOCK_USDC_MINT_DEPLOYER=0: if deploying MockUSDC, skip minting 1M USDC to deployer
  */
 
@@ -110,6 +111,14 @@ async function main() {
     console.error("Missing PRESALE_FINALIZER env var. Refusing to deploy.");
     return;
   }
+  const nexusPresaleFounder = process.env.NEXUS_PRESALE_BONUS_FOUNDER_NFT?.trim() as Address | undefined;
+  const nexusPresaleLaunch = process.env.NEXUS_PRESALE_BONUS_INITIAL_LAUNCH?.trim() as Address | undefined;
+  if (!nexusPresaleFounder || !nexusPresaleLaunch) {
+    console.error(
+      "Missing NEXUS_PRESALE_BONUS_FOUNDER_NFT or NEXUS_PRESALE_BONUS_INITIAL_LAUNCH. Refusing to deploy (required for immutable NEXUS presale bonus minters).",
+    );
+    return;
+  }
   if (!stablecoinAddress) {
     console.log("\n0. Deploying MockUSDC (no STABLECOIN_ADDRESS provided)...");
     const mockUsdc = await viem.deployContract("contracts/test/MockUSDC.sol:MockUSDC", [], {
@@ -140,13 +149,15 @@ async function main() {
   const futureTcgvAddress = getContractAddress({ from: deployer.account.address, nonce: nonce + 1n });
   const nexusTokenAddress = getContractAddress({ from: deployer.account.address, nonce });
 
-  console.log("\n1. Deploying TCGNexus Token (minter = predicted TCGV)...");
-  await viem.deployContract("TCGNexusToken", [futureTcgvAddress], { client: { wallet: deployer } });
+  console.log("\n1. Deploying TCGNexus Token (minter = predicted TCGV; immutable presale bonus minters from env)...");
+  await viem.deployContract("TCGNexusToken", [futureTcgvAddress, nexusPresaleFounder, nexusPresaleLaunch], {
+    client: { wallet: deployer },
+  });
   nonce += 1n;
   console.log("TCGNexus Token deployed to:", nexusTokenAddress);
   verifyJobs.push({
     address: nexusTokenAddress,
-    constructorArguments: [futureTcgvAddress],
+    constructorArguments: [futureTcgvAddress, nexusPresaleFounder, nexusPresaleLaunch],
     contract: "contracts/TCGNexusToken.sol:TCGNexusToken",
   });
 

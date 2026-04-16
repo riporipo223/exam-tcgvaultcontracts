@@ -168,7 +168,7 @@ contract TCGVaultFounderNFT is ERC721, Ownable, ReentrancyGuard {
 
         _burn(tokenId);
 
-        if (nexusClawedBack > 0) _nexusToken.burnPresaleBonus(msg.sender, nexusClawedBack);
+        if (nexusClawedBack > 0) _nexusToken.clawBackPresaleBonus(msg.sender, nexusClawedBack);
 
         emit FounderPurchaseCancelled(msg.sender, tokenId, usdcRefundDue, nexusClawedBack);
     }

@@ -18,7 +18,7 @@
  *
  * Flow:
  *   1. Deploy: TCGVaultToken, TCGNexusToken, TCGVaultFounderNFT, TCGVaultInitialLaunch, BuyRouter, Wrapper, TCGR, Converter (USDC = real BSC USDC).
- *   2. Fund all accounts with real USDC via storage cheatcode; wire Nexus presale minters (token presaleFinalizer is immutable = InitialLaunch).
+ *   2. Fund all accounts with real USDC via storage cheatcode (token presaleFinalizer is immutable = InitialLaunch; NEXUS presale bonus minters set in Nexus constructor).
  *   3. Trader buys TCGV (wave 1).
  *   4. Mint 250 Founder NFTs (245 trader + 5 owner) so wave 2 starts; exhaust to 500; wave-2 buys; large-scale multiple buyers.
  *   5. Time travel 121h, finalize; assert buy() reverts (PresaleEnded).
@@ -264,19 +264,23 @@ async function main() {
   );
 
   // --- Phase 1: Deploy core contracts (use real BSC USDC) ---
-  // TCGVaultToken.presaleFinalizer is immutable → predict InitialLaunch address (nonce+3) before deploying token (nonce+1).
+  // CREATE order (nonce .. nonce+3): Nexus, TCGV, FounderNFT, InitialLaunch — all addresses predicted up front.
+  // TCGVaultToken.stakingVault is immutable → predict TCGVaultStakingVault at nonce+4 and deploy it immediately after InitialLaunch.
   console.log("--- Phase 1: Deploy core contracts (USDC = real BSC USDC) ---");
 
   const nexusTokenAddress = getContractAddress({ from: deployer.account.address, nonce }) as Address;
   const tokenAddress = getContractAddress({ from: deployer.account.address, nonce: nonce + 1n }) as Address;
   const founderNFTAddress = getContractAddress({ from: deployer.account.address, nonce: nonce + 2n }) as Address;
   const initialLaunchAddress = getContractAddress({ from: deployer.account.address, nonce: nonce + 3n }) as Address;
+  const stakingVaultAddress = getContractAddress({ from: deployer.account.address, nonce: nonce + 4n }) as Address;
 
-  await viem.deployContract("contracts/TCGNexusToken.sol:TCGNexusToken", [tokenAddress], { client: { wallet: deployer } });
+  await viem.deployContract("contracts/TCGNexusToken.sol:TCGNexusToken", [tokenAddress, founderNFTAddress, initialLaunchAddress], {
+    client: { wallet: deployer },
+  });
   nonce += 1n;
 
   await viem.deployContract("TCGVaultToken", [
-    ZERO,
+    stakingVaultAddress,
     PANCAKE_ROUTER,
     vaultAddr,
     marketingAddr,
@@ -300,6 +304,9 @@ async function main() {
   ], { client: { wallet: deployer } });
   nonce += 1n;
 
+  await viem.deployContract("TCGVaultStakingVault", [tokenAddress], { client: { wallet: deployer } });
+  nonce += 1n;
+
   const nexusToken = await viem.getContractAt("TCGNexusToken", nexusTokenAddress);
   const token = await viem.getContractAt("TCGVaultToken", tokenAddress);
   const founderNFT = await viem.getContractAt("TCGVaultFounderNFT", founderNFTAddress);
@@ -309,10 +316,9 @@ async function main() {
   console.log("TCGVaultToken:", tokenAddress);
   console.log("TCGVaultFounderNFT:", founderNFTAddress);
   console.log("TCGVaultInitialLaunch:", initialLaunchAddress);
+  console.log("TCGVaultStakingVault:", stakingVaultAddress);
 
-  await nexusToken.write.setPresaleMinter([founderNFTAddress, true], { account: deployer.account });
-  await nexusToken.write.setPresaleMinter([initialLaunchAddress, true], { account: deployer.account });
-  console.log("Presale finalizer (immutable) = InitialLaunch; Nexus presale minters set.");
+  console.log("Presale finalizer (immutable) = InitialLaunch; Nexus presale bonus minters = FounderNFT + InitialLaunch (constructor).");
   console.log();
 
   // --- Phase 2: BuyRouter & Wrapper (for optional DEX later) ---
@@ -703,6 +709,7 @@ async function main() {
         const convertAmount = deployerTcgrBal / 2n;
         if (convertAmount > 0n) {
           const deployerTcgvBefore = await token.read.balanceOf([deployer.account.address]);
+          await tcgr.write.approve([converterAddress, convertAmount], { account: deployer.account });
           await converter.write.convert([convertAmount], { account: deployer.account });
           const deployerTcgvAfter = await token.read.balanceOf([deployer.account.address]);
           const tcgvOut = deployerTcgvAfter - deployerTcgvBefore;

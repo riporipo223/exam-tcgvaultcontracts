@@ -11,7 +11,7 @@
  * 3. setMinStakeForBasicNFT, setBasicNFTContract on vault
  * 4. TCGVaultFounderNFT(usdc, nexusToken, caspUsdcRecipient) — env: CASP_USDC_ADDRESS (fallback: TREASURY_ADDRESS or deployer)
  * 5. TCGVaultInitialLaunch(tcgv, usdc, founderNFT, nexusToken, treasury) — env: TREASURY_ADDRESS (fallback: CASP_USDC_ADDRESS or deployer)
- * 6. nexus.setPresaleMinter(founderNFT), nexus.setPresaleMinter(initialLaunch)
+ * 6. NEXUS must have been deployed with immutable presale bonus minters = FounderNFT + InitialLaunch (constructor); no setter.
  * 7. Transfer 600M TCGV (60% of supply) to InitialLaunch for presale vesting claims
  *
  * Usage:
@@ -69,10 +69,7 @@ async function main() {
   ], { client: { wallet: deployer } });
   console.log("TCGVaultInitialLaunch:", initialLaunch.address);
 
-  const nexus = await viem.getContractAt("TCGNexusToken", nexusAddress);
-  await nexus.write.setPresaleMinter([founderNFT.address, true], { account: deployer.account });
-  await nexus.write.setPresaleMinter([initialLaunch.address, true], { account: deployer.account });
-  console.log("NEXUS: set PresaleMinter for Founder NFT and Initial Launch");
+  console.log("NEXUS presale bonus minters are immutable at deploy; ensure NEXUS was deployed with this FounderNFT and InitialLaunch addresses.");
 
   console.log("\n--- Summary ---");
   console.log("StakingVault:", vault.address);

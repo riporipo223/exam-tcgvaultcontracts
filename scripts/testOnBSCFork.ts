@@ -15,7 +15,7 @@ import {
  * End-to-end test script for TCG Vault on BSC fork (post-presale tokenomics).
  *
  * Presale flow is covered by scripts/testFullFlowOnBSCFork.ts. This script validates DEX and BuyRouter:
- *   Phase 1 — Deploy: TCGVaultToken, TCGNexusToken, TCGVaultBuyRouter (USDC), TCGVaultLiquidityWrapper (MockPresaleLaunch for initial supply)
+ *   Phase 1 — Deploy: MockPresaleLaunch, TCGNexusToken, TCGVaultToken (immutable staking vault), TCGVaultStakingVault, BuyRouter, Wrapper (MockPresaleLaunch for initial supply)
  *   Phase 2 — Pair TCGV/USDC only, add liquidity via wrapper
  *   Phase 3 — Buy: PancakeSwap USDC→TCGV (3.1), TCGVaultBuyRouter USDC→TCGV (3.2), direct pair USDC→TCGV (3.3), dummy router USDC (5.2)
  *   Phase 4 — Sell: PancakeSwap TCGV→USDC (4.1), TCGVaultBuyRouter TCGV→USDC (4.2)
@@ -167,11 +167,14 @@ async function main() {
 
   // Deployment order:
   //   nonce + 0: MockPresaleLaunch
-  //   nonce + 1: TCGNexusToken
-  //   nonce + 2: TCGVaultToken
+  //   nonce + 1: TCGNexusToken (presale bonus minters: mock presale + deployer EOA — unused on this fork path)
+  //   nonce + 2: TCGVaultToken (stakingVault immutable → predicted at nonce+3)
+  //   nonce + 3: TCGVaultStakingVault(asset = TCGV)
   const mockPresaleLaunchAddress = getContractAddress({ from: deployer.account.address, nonce }) as Address;
   const nexusTokenAddress = getContractAddress({ from: deployer.account.address, nonce: nonce + 1n }) as Address;
   const futureTcgvAddr = getContractAddress({ from: deployer.account.address, nonce: nonce + 2n }) as Address;
+  const stakingVaultAddress = getContractAddress({ from: deployer.account.address, nonce: nonce + 3n }) as Address;
+  const nexusBonusLaunchPlaceholder = deployer.account.address as Address;
 
   console.log("1.1 Deploying MockPresaleLaunch (immutable presale finalizer for TCGV)...");
   await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], {
@@ -185,8 +188,8 @@ async function main() {
   console.log(`    MockPresaleLaunch: ${mockPresaleLaunchAddress}`);
   console.log();
 
-  console.log("1.2 Deploying TCGNexusToken (minter = predicted TCGV)...");
-  await viem.deployContract("contracts/TCGNexusToken.sol:TCGNexusToken", [futureTcgvAddr], {
+  console.log("1.2 Deploying TCGNexusToken (minter = predicted TCGV; presale bonus minters = mock presale + deployer placeholder)...");
+  await viem.deployContract("contracts/TCGNexusToken.sol:TCGNexusToken", [futureTcgvAddr, mockPresaleLaunchAddress, nexusBonusLaunchPlaceholder], {
     client: { wallet: deployer },
   });
   nonce += 1n;
@@ -194,9 +197,9 @@ async function main() {
   console.log(`    TCGNexusToken: ${nexusTokenAddress}`);
   console.log();
 
-  console.log("1.3 Deploying TCGVaultToken (immutable NEXUS + immutable presaleFinalizer)...");
+  console.log("1.3 Deploying TCGVaultToken (immutable NEXUS + presaleFinalizer + stakingVault)...");
   await viem.deployContract("TCGVaultToken", [
-    ZERO,
+    stakingVaultAddress,
     PANCAKE_ROUTER,
     vaultAddr,
     marketingAddr,
@@ -209,6 +212,12 @@ async function main() {
   const token = await viem.getContractAt("TCGVaultToken", tokenAddress);
   console.log(`    TCGVaultToken: ${tokenAddress}`);
   console.log(`    Total supply:  ${formatEther((await token.read.totalSupply()))} TCGV`);
+  console.log();
+
+  console.log("1.3b Deploying TCGVaultStakingVault (predicted address wired in TCGV constructor)...");
+  await viem.deployContract("TCGVaultStakingVault", [tokenAddress], { client: { wallet: deployer } });
+  nonce += 1n;
+  console.log(`    TCGVaultStakingVault: ${stakingVaultAddress}`);
   console.log();
 
   console.log("1.4 Fund deployer & trader with BSC USDC (cheatcode)...");

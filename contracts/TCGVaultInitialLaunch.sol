@@ -165,10 +165,10 @@ contract TCGVaultInitialLaunch is Ownable, ReentrancyGuard {
         _totalTCGVAllocated -= tcgvAmount;
 
         // Burn tokens held by this contract.
-        ITCGVaultToken(address(_tcgv)).burnPresale(address(this), tcgvAmount);
+        ITCGVaultToken(address(_tcgv)).burnPresaleAllocation(address(this), tcgvAmount);
 
         if (o.nexusAmount > 0) {
-            _nexusToken.burnPresaleBonus(msg.sender, o.nexusAmount);
+            _nexusToken.clawBackPresaleBonus(msg.sender, o.nexusAmount);
         }
 
         emit PresaleOrderCancelled(

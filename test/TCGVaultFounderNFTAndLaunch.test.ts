@@ -5,7 +5,7 @@
 import { describe, it, before } from "node:test";
 import { expect } from "chai";
 import hre from "hardhat";
-import { getAddress, parseEther } from "viem";
+import { getAddress, getContractAddress, parseEther } from "viem";
 import type { ContractReturnType } from "@nomicfoundation/hardhat-viem/types";
 
 const { viem, networkHelpers } = await hre.network.connect();
@@ -18,6 +18,50 @@ async function expectRevert(promise: Promise<unknown>) {
     reverted = true;
   }
   expect(reverted).to.equal(true);
+}
+
+/** Deploy MockTCGV + NEXUS (immutable presale minters) + FounderNFT + InitialLaunch in fixed CREATE order. */
+async function deployIsolatedPresaleStack(
+  deployer: Awaited<ReturnType<typeof viem.getWalletClients>>[0],
+  usdcAddr: `0x${string}`,
+) {
+  const publicClient = await viem.getPublicClient();
+  const from = deployer.account.address;
+  const n0 = BigInt(await publicClient.getTransactionCount({ address: from, blockTag: "pending" }));
+  const mockAddr = getContractAddress({ from, nonce: n0 });
+  const nexusAddr = getContractAddress({ from, nonce: n0 + 1n });
+  const founderAddr = getContractAddress({ from, nonce: n0 + 2n });
+  const launchAddr = getContractAddress({ from, nonce: n0 + 3n });
+
+  const mockTcgv = await viem.deployContract("contracts/test/MockTCGVPresale.sol:MockTCGVPresale", [], {
+    client: { wallet: deployer },
+  });
+  if (mockTcgv.address.toLowerCase() !== mockAddr.toLowerCase()) {
+    throw new Error("MockTCGV nonce mismatch");
+  }
+  await viem.deployContract(
+    "TCGNexusToken",
+    [mockAddr, founderAddr, launchAddr],
+    { client: { wallet: deployer } },
+  );
+  const founder = await viem.deployContract(
+    "TCGVaultFounderNFT",
+    [usdcAddr, nexusAddr, deployer.account.address],
+    { client: { wallet: deployer } },
+  );
+  const launch = await viem.deployContract(
+    "TCGVaultInitialLaunch",
+    [mockAddr, usdcAddr, founder.address, nexusAddr, deployer.account.address],
+    { client: { wallet: deployer } },
+  );
+  const tcgvC = await viem.getContractAt("MockTCGVPresale", mockAddr);
+  await tcgvC.write.setPresaleFinalizer([launchAddr], { account: deployer.account });
+  return {
+    mockTcgv: tcgvC,
+    nexus: await viem.getContractAt("TCGNexusToken", nexusAddr),
+    founder: await viem.getContractAt("TCGVaultFounderNFT", founder.address),
+    launch: await viem.getContractAt("TCGVaultInitialLaunch", launch.address),
+  };
 }
 
 describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
@@ -71,27 +115,33 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
     await usdc.write.transfer([user1.account.address, parseEther("50")], { account: owner.account });
     await usdc.write.transfer([buyer.account.address, parseEther("10")], { account: owner.account });
 
+    const publicClient = await viem.getPublicClient();
+    const n0 = BigInt(await publicClient.getTransactionCount({ address: owner.account.address, blockTag: "pending" }));
+    const mockAddr = getContractAddress({ from: owner.account.address, nonce: n0 });
+    const nexusAddr = getContractAddress({ from: owner.account.address, nonce: n0 + 1n });
+    const founderAddr = getContractAddress({ from: owner.account.address, nonce: n0 + 2n });
+    const launchAddr = getContractAddress({ from: owner.account.address, nonce: n0 + 3n });
+
     const mockTcgv = await viem.deployContract("contracts/test/MockTCGVPresale.sol:MockTCGVPresale", [], { client: { wallet: owner } });
     tcgv = await viem.getContractAt("MockTCGVPresale", mockTcgv.address);
 
-    nexus = await viem.deployContract("TCGNexusToken", [owner.account.address], { client: { wallet: owner } });
+    await viem.deployContract("TCGNexusToken", [mockAddr, founderAddr, launchAddr], { client: { wallet: owner } });
+    nexus = await viem.getContractAt("TCGNexusToken", nexusAddr);
 
     founderNFT = await viem.deployContract("TCGVaultFounderNFT", [
       usdc.address,
-      nexus.address,
+      nexusAddr,
       owner.account.address, // CASP USDC recipient
     ], { client: { wallet: owner } });
     initialLaunch = await viem.deployContract("TCGVaultInitialLaunch", [
-      tcgv.address,
+      mockAddr,
       usdc.address,
-      founderNFT.address,
-      nexus.address,
+      founderAddr,
+      nexusAddr,
       owner.account.address,
     ], { client: { wallet: owner } });
 
-    await tcgv.write.setPresaleFinalizer([initialLaunch.address], { account: owner.account });
-    await nexus.write.setPresaleMinter([founderNFT.address, true], { account: owner.account });
-    await nexus.write.setPresaleMinter([initialLaunch.address, true], { account: owner.account });
+    await tcgv.write.setPresaleFinalizer([launchAddr], { account: owner.account });
   });
 
   describe("TCGVaultFounderNFT", () => {
@@ -193,12 +243,7 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
     });
 
     it("mint reverts ExceedsSupply when 500 sold", async () => {
-      const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
-        usdc.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
+      const { founder: freshFounder } = await deployIsolatedPresaleStack(owner, usdc.address as `0x${string}`);
       const user1Amount = BigInt(245 * WAVE1_PRICE + 245 * WAVE2_PRICE);
       await usdc.write.transfer([user1.account.address, user1Amount], { account: owner.account });
       await usdc.write.approve([freshFounder.address, user1Amount], { account: user1.account });
@@ -212,13 +257,7 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       await expectRevert(freshFounder.write.mint({ account: user1.account }));
     });
     it("owner cannot mint more than 5 NFTs in wave 1", async () => {
-      const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
-        usdc.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-
-      await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
+      const { founder: freshFounder } = await deployIsolatedPresaleStack(owner, usdc.address as `0x${string}`);
 
       const bigApprove = 10n ** 24n;
       await usdc.write.approve([freshFounder.address, bigApprove], { account: owner.account });
@@ -234,12 +273,7 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
     });
 
     it("owner cannot mint more than 5 NFTs in wave 2", async () => {
-      const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
-        usdc.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
+      const { founder: freshFounder } = await deployIsolatedPresaleStack(owner, usdc.address as `0x${string}`);
       const user1Amount = BigInt(245 * WAVE1_PRICE + 245 * WAVE2_PRICE);
       await usdc.write.transfer([user1.account.address, user1Amount], { account: owner.account });
       await usdc.write.approve([freshFounder.address, user1Amount], { account: user1.account });
@@ -252,24 +286,14 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       await expectRevert(freshFounder.write.mint({ account: owner.account }));
     });
     it("ReservedForOwner: non-owner cannot mint when only owner quota left in wave 1", async () => {
-      const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
-        usdc.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
+      const { founder: freshFounder } = await deployIsolatedPresaleStack(owner, usdc.address as `0x${string}`);
       await usdc.write.approve([freshFounder.address, BigInt(246 * WAVE1_PRICE)], { account: user1.account });
       for (let i = 0; i < 245; i++) await freshFounder.write.mint({ account: user1.account });
       await expectRevert(freshFounder.write.mint({ account: user1.account }));
     });
 
     it("ReservedForOwner: non-owner cannot mint in wave 2 when only owner quota left", async () => {
-      const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
-        usdc.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
+      const { founder: freshFounder } = await deployIsolatedPresaleStack(owner, usdc.address as `0x${string}`);
       const user1Wave1 = BigInt(245 * WAVE1_PRICE);
       const user1Wave2 = BigInt(245 * WAVE2_PRICE);
       await usdc.write.transfer([user1.account.address, user1Wave1 + user1Wave2], { account: owner.account });
@@ -345,25 +369,14 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
     });
 
     it("buy reverts PresaleEnded when presale is already finalized", async () => {
-      const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
-        usdc.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
+      const { founder: freshFounder, launch: freshLaunch } = await deployIsolatedPresaleStack(
+        owner,
+        usdc.address as `0x${string}`,
+      );
       await usdc.write.approve([freshFounder.address, BigInt(245 * WAVE1_PRICE)], { account: user1.account });
       for (let i = 0; i < 245; i++) await freshFounder.write.mint({ account: user1.account });
       await usdc.write.approve([freshFounder.address, BigInt(5 * WAVE1_PRICE)], { account: owner.account });
       for (let i = 0; i < 5; i++) await freshFounder.write.mint({ account: owner.account });
-      const freshLaunch = await viem.deployContract("TCGVaultInitialLaunch", [
-        tcgv.address,
-        usdc.address,
-        freshFounder.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await tcgv.write.setPresaleFinalizer([freshLaunch.address], { account: owner.account });
-      await nexus.write.setPresaleMinter([freshLaunch.address, true], { account: owner.account });
       await usdc.write.approve([freshLaunch.address, BigInt(8 * 1e6)], { account: user1.account });
       await freshLaunch.write.buy([BigInt(8 * 1e6)], { account: user1.account });
       await networkHelpers.time.increase(121 * 3600 + 20 * 24 * 3600);
@@ -375,7 +388,6 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
         freshLaunch,
         "PresaleEnded"
       );
-      await tcgv.write.setPresaleFinalizer([initialLaunch.address], { account: owner.account });
     });
 
     it("finalize and claim vesting 10% TGE", async () => {
@@ -422,25 +434,14 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
     });
 
     it("buy reverts ExceedsHardCap when total TCGV would exceed hard cap", async () => {
-      const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
-        usdc.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
+      const { founder: freshFounder, launch: freshLaunch } = await deployIsolatedPresaleStack(
+        owner,
+        usdc.address as `0x${string}`,
+      );
       await usdc.write.approve([freshFounder.address, BigInt(245 * WAVE1_PRICE)], { account: user1.account });
       for (let i = 0; i < 245; i++) await freshFounder.write.mint({ account: user1.account });
       await usdc.write.approve([freshFounder.address, BigInt(5 * WAVE1_PRICE)], { account: owner.account });
       for (let i = 0; i < 5; i++) await freshFounder.write.mint({ account: owner.account });
-      const freshLaunch = await viem.deployContract("TCGVaultInitialLaunch", [
-        tcgv.address,
-        usdc.address,
-        freshFounder.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await tcgv.write.setPresaleFinalizer([freshLaunch.address], { account: owner.account });
-      await nexus.write.setPresaleMinter([freshLaunch.address, true], { account: owner.account });
       const price = await freshLaunch.read.currentPrice();
       const HARD_CAP_TCGV = 600_000_000n * (10n ** 18n);
       const usdcToExceedCap = (HARD_CAP_TCGV * price) / (10n ** 18n) + 1n;
@@ -451,29 +452,17 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
         freshLaunch,
         "ExceedsHardCap"
       );
-      await tcgv.write.setPresaleFinalizer([initialLaunch.address], { account: owner.account });
     });
 
     it("releasable returns total - claimed when monthsElapsed >= 9 (full vesting)", async () => {
-      const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
-        usdc.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
+      const { founder: freshFounder, launch: freshLaunch } = await deployIsolatedPresaleStack(
+        owner,
+        usdc.address as `0x${string}`,
+      );
       await usdc.write.approve([freshFounder.address, BigInt(245 * WAVE1_PRICE)], { account: user1.account });
       for (let i = 0; i < 245; i++) await freshFounder.write.mint({ account: user1.account });
       await usdc.write.approve([freshFounder.address, BigInt(5 * WAVE1_PRICE)], { account: owner.account });
       for (let i = 0; i < 5; i++) await freshFounder.write.mint({ account: owner.account });
-      const freshLaunch = await viem.deployContract("TCGVaultInitialLaunch", [
-        tcgv.address,
-        usdc.address,
-        freshFounder.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await tcgv.write.setPresaleFinalizer([freshLaunch.address], { account: owner.account });
-      await nexus.write.setPresaleMinter([freshLaunch.address, true], { account: owner.account });
       const usdcAmount = 8 * 1e6;
       await usdc.write.approve([freshLaunch.address, BigInt(usdcAmount)], { account: user1.account });
       await freshLaunch.write.buy([BigInt(usdcAmount)], { account: user1.account });
@@ -487,29 +476,17 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       await networkHelpers.mine();
       const releasableFull = await freshLaunch.read.releasable([user1.account.address]);
       expect(releasableFull).to.equal(total);
-      await tcgv.write.setPresaleFinalizer([initialLaunch.address], { account: owner.account });
     });
 
     it("releasable vesting path: vested and return when monthsElapsed < 9", async () => {
-      const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
-        usdc.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
+      const { founder: freshFounder, launch: freshLaunch } = await deployIsolatedPresaleStack(
+        owner,
+        usdc.address as `0x${string}`,
+      );
       await usdc.write.approve([freshFounder.address, BigInt(245 * WAVE1_PRICE)], { account: user1.account });
       for (let i = 0; i < 245; i++) await freshFounder.write.mint({ account: user1.account });
       await usdc.write.approve([freshFounder.address, BigInt(5 * WAVE1_PRICE)], { account: owner.account });
       for (let i = 0; i < 5; i++) await freshFounder.write.mint({ account: owner.account });
-      const freshLaunch = await viem.deployContract("TCGVaultInitialLaunch", [
-        tcgv.address,
-        usdc.address,
-        freshFounder.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await tcgv.write.setPresaleFinalizer([freshLaunch.address], { account: owner.account });
-      await nexus.write.setPresaleMinter([freshLaunch.address, true], { account: owner.account });
       const usdcAmount = 8 * 1e6;
       await usdc.write.approve([freshLaunch.address, BigInt(usdcAmount)], { account: user1.account });
       await freshLaunch.write.buy([BigInt(usdcAmount)], { account: user1.account });
@@ -524,29 +501,17 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const releasable8m = await freshLaunch.read.releasable([user1.account.address]);
       const expectedVested = (total * (10n + 8n * 10n)) / 100n;
       expect(releasable8m).to.equal(expectedVested);
-      await tcgv.write.setPresaleFinalizer([initialLaunch.address], { account: owner.account });
     });
 
     it("releasable never exceeds total at any month 0..10", async () => {
-      const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
-        usdc.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
+      const { founder: freshFounder, launch: freshLaunch } = await deployIsolatedPresaleStack(
+        owner,
+        usdc.address as `0x${string}`,
+      );
       await usdc.write.approve([freshFounder.address, BigInt(245 * WAVE1_PRICE)], { account: user1.account });
       for (let i = 0; i < 245; i++) await freshFounder.write.mint({ account: user1.account });
       await usdc.write.approve([freshFounder.address, BigInt(5 * WAVE1_PRICE)], { account: owner.account });
       for (let i = 0; i < 5; i++) await freshFounder.write.mint({ account: owner.account });
-      const freshLaunch = await viem.deployContract("TCGVaultInitialLaunch", [
-        tcgv.address,
-        usdc.address,
-        freshFounder.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await tcgv.write.setPresaleFinalizer([freshLaunch.address], { account: owner.account });
-      await nexus.write.setPresaleMinter([freshLaunch.address, true], { account: owner.account });
       const usdcAmount = 8 * 1e6;
       await usdc.write.approve([freshLaunch.address, BigInt(usdcAmount)], { account: user1.account });
       await freshLaunch.write.buy([BigInt(usdcAmount)], { account: user1.account });
@@ -564,29 +529,17 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
         const r = await freshLaunch.read.releasable([user1.account.address]);
         expect(r <= total).to.equal(true);
       }
-      await tcgv.write.setPresaleFinalizer([initialLaunch.address], { account: owner.account });
     });
 
     it("releasable returns 0 after user claimed all", async () => {
-      const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
-        usdc.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
+      const { founder: freshFounder, launch: freshLaunch } = await deployIsolatedPresaleStack(
+        owner,
+        usdc.address as `0x${string}`,
+      );
       await usdc.write.approve([freshFounder.address, BigInt(245 * WAVE1_PRICE)], { account: user1.account });
       for (let i = 0; i < 245; i++) await freshFounder.write.mint({ account: user1.account });
       await usdc.write.approve([freshFounder.address, BigInt(5 * WAVE1_PRICE)], { account: owner.account });
       for (let i = 0; i < 5; i++) await freshFounder.write.mint({ account: owner.account });
-      const freshLaunch = await viem.deployContract("TCGVaultInitialLaunch", [
-        tcgv.address,
-        usdc.address,
-        freshFounder.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await tcgv.write.setPresaleFinalizer([freshLaunch.address], { account: owner.account });
-      await nexus.write.setPresaleMinter([freshLaunch.address, true], { account: owner.account });
       const usdcAmount = 8 * 1e6;
       await usdc.write.approve([freshLaunch.address, BigInt(usdcAmount)], { account: user1.account });
       await freshLaunch.write.buy([BigInt(usdcAmount)], { account: user1.account });
@@ -596,7 +549,6 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const releasableBefore = await freshLaunch.read.releasable([user1.account.address]);
       if (releasableBefore > 0n) await freshLaunch.write.claim({ account: user1.account });
       expect(await freshLaunch.read.releasable([user1.account.address])).to.equal(0n);
-      await tcgv.write.setPresaleFinalizer([initialLaunch.address], { account: owner.account });
     });
 
     it("presaleEndTime returns max when wave2 not started", async () => {
@@ -643,28 +595,16 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
     });
 
     it("buy reverts ExceedsWalletCap when allocation would exceed maxPerWallet", async function () {
-      const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
-        usdc.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await nexus.write.setPresaleMinter([freshFounder.address, true], { account: owner.account });
-      const wave1Cap = 250;
+      const { founder: freshFounder, launch: freshLaunch } = await deployIsolatedPresaleStack(
+        owner,
+        usdc.address as `0x${string}`,
+      );
       const nonOwnerMints = 245;
       const ownerMints = 5;
       await usdc.write.approve([freshFounder.address, BigInt(nonOwnerMints * WAVE1_PRICE)], { account: user1.account });
       for (let i = 0; i < nonOwnerMints; i++) await freshFounder.write.mint({ account: user1.account });
       await usdc.write.approve([freshFounder.address, BigInt(ownerMints * WAVE1_PRICE)], { account: owner.account });
       for (let i = 0; i < ownerMints; i++) await freshFounder.write.mint({ account: owner.account });
-      const freshLaunch = await viem.deployContract("TCGVaultInitialLaunch", [
-        tcgv.address,
-        usdc.address,
-        freshFounder.address,
-        nexus.address,
-        owner.account.address,
-      ], { client: { wallet: owner } });
-      await tcgv.write.setPresaleFinalizer([freshLaunch.address], { account: owner.account });
-      await nexus.write.setPresaleMinter([freshLaunch.address, true], { account: owner.account });
       const maxPerWallet = await freshLaunch.read.maxPerWallet();
       const price = await freshLaunch.read.currentPrice();
       const usdcForFullCap = (maxPerWallet * price) / (10n ** 18n);
@@ -672,7 +612,6 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       await usdc.write.approve([freshLaunch.address, usdcForFullCap + 10n ** 6n], { account: user1.account });
       await freshLaunch.write.buy([10n ** 6n], { account: user1.account });
       await expectRevert(freshLaunch.write.buy([usdcForFullCap], { account: user1.account }));
-      await tcgv.write.setPresaleFinalizer([initialLaunch.address], { account: owner.account });
     });
 
     it("releasable returns 0 when not finalized", async () => {

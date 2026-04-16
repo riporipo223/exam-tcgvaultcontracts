@@ -579,11 +579,10 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     }
 
     /**
-     * @notice Burn presale allocations held by the presale contracts.
-     * @dev Used for MiCA cooling-off cancellations. Burns from `from`.
-     *      Access: only `presaleFinalizer`.
+     * @notice Burn presale allocations from `from` (e.g. cooling-off cancellations).
+     * @dev Used for MiCA cooling-off cancellations. Access: only `presaleFinalizer` (e.g. InitialLaunch).
      */
-    function burnPresale(address from, uint256 amount) external {
+    function burnPresaleAllocation(address from, uint256 amount) external {
         if (msg.sender != presaleFinalizer) revert OnlyPresaleFinalizer();
         if (from == address(0)) revert ZeroAddress();
         if (amount == 0) return;

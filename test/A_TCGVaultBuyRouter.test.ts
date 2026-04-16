@@ -34,8 +34,10 @@ async function deployFixture() {
   const n0 = BigInt(await publicClient.getTransactionCount({ address: owner.account.address, blockTag: "pending" }));
   const futureTcgv = getContractAddress({ from: owner.account.address, nonce: n0 + 1n });
   const nexusAddr = getContractAddress({ from: owner.account.address, nonce: n0 });
+  const bonusA = user1.account.address as `0x${string}`;
+  const bonusB = vault.account.address as `0x${string}`;
 
-  await viem.deployContract("TCGNexusToken", [futureTcgv], { client: { wallet: owner } });
+  await viem.deployContract("TCGNexusToken", [futureTcgv, bonusA, bonusB], { client: { wallet: owner } });
   const tcgvContract = await viem.deployContract("TCGVaultToken", [
     zeroAddress,
     routerAddress,

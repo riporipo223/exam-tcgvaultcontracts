@@ -64,7 +64,7 @@ contract TCGRToTCGVConverter is Ownable {
 
     /**
      * @notice Burn tcgrAmount TCGR and send (tcgrAmount * ratio) / 1e18 TCGV to msg.sender.
-     * @dev Caller must have approved this contract to burn their TCGR (via TCGR.setConverter(this) and then user calls convert; the burn is done by this contract calling tcgr.burnFrom(user, amount)).
+     * @dev Caller must have approved this contract on TCGR for at least `tcgrAmount` (ERC-20 allowance). This contract must be set as the TCGR converter.
      */
     function convert(uint256 tcgrAmount) external {
         if (tcgrAmount == 0) revert ZeroAmount();
@@ -72,7 +72,7 @@ contract TCGRToTCGVConverter is Ownable {
         if (tcgvOut == 0) revert ZeroAmount();
         if (_tcgv.balanceOf(address(this)) < tcgvOut) revert InsufficientTcgvReserve();
 
-        ITCGRToken(address(_tcgr)).burnFrom(msg.sender, tcgrAmount); // only callable because this contract is set as converter on TCGR
+        ITCGRToken(address(_tcgr)).burnForConversion(msg.sender, tcgrAmount);
         _tcgv.safeTransfer(msg.sender, tcgvOut);
         emit Converted(msg.sender, tcgrAmount, tcgvOut);
     }

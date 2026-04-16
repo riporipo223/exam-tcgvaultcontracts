@@ -26,13 +26,17 @@ async function deployFreshTcgvWithNexus(
   vault: `0x${string}`,
   marketing: `0x${string}`,
   community: `0x${string}`,
-  presaleFinalizer: `0x${string}`
+  presaleFinalizer: `0x${string}`,
+  nexusPresaleBonusFounder: `0x${string}`,
+  nexusPresaleBonusLaunch: `0x${string}`,
 ) {
   const pc = await viem.getPublicClient();
   const n0 = BigInt(await pc.getTransactionCount({ address: owner.account.address, blockTag: "pending" }));
   const futureTcgv = getContractAddress({ from: owner.account.address, nonce: n0 + 1n });
   const nexusAddr = getContractAddress({ from: owner.account.address, nonce: n0 });
-  await viem.deployContract("TCGNexusToken", [futureTcgv], { client: { wallet: owner } });
+  await viem.deployContract("TCGNexusToken", [futureTcgv, nexusPresaleBonusFounder, nexusPresaleBonusLaunch], {
+    client: { wallet: owner },
+  });
   const tcgvContract = await viem.deployContract("TCGVaultToken", [
     stakingVault,
     router,
@@ -136,7 +140,11 @@ describe("TCGVaultToken", () => {
     const futureTcgvAddr = getContractAddress({ from: owner.account.address, nonce: n0 + 1n });
     const expectedNexusAddr = getContractAddress({ from: owner.account.address, nonce: n0 });
 
-    const nexusContract = await viem.deployContract("TCGNexusToken", [futureTcgvAddr], { client: { wallet: owner } });
+    const nexusContract = await viem.deployContract(
+      "TCGNexusToken",
+      [futureTcgvAddr, user1.account.address, user2.account.address],
+      { client: { wallet: owner } },
+    );
     nexusAddress = nexusContract.address as `0x${string}`;
     nexus = await viem.getContractAt("TCGNexusToken", nexusAddress);
 
@@ -627,7 +635,9 @@ describe("TCGVaultToken", () => {
         vault.account.address,
         marketing.account.address,
         community.account.address,
-        freshMock.address
+        freshMock.address,
+        freshMock.address,
+        owner.account.address,
       );
       await expectRevert(
         freshMock.write.finalizePresaleAndRecompute([freshTcgv.address], { account: owner.account })
@@ -660,7 +670,9 @@ describe("TCGVaultToken", () => {
         vault.account.address,
         marketing.account.address,
         community.account.address,
-        freshMock.address
+        freshMock.address,
+        freshMock.address,
+        owner.account.address,
       );
       await freshTcgv.write.setAllocationRecipients([vault.account.address, marketing.account.address, community.account.address], { account: owner.account });
       await freshMock.write.finalizePresaleAndRecompute([freshTcgv.address], { account: owner.account });
@@ -760,11 +772,10 @@ describe("TCGVaultToken", () => {
       const m = await nexus.read.minter();
       expect(m.toLowerCase()).to.equal(tcgvAddress.toLowerCase());
     });
-    it("NEXUS allowedPresaleMinters returns true for set address", async () => {
-      await nexus.write.setPresaleMinter([user1.account.address, true], { account: owner.account });
-      expect(await nexus.read.allowedPresaleMinters([user1.account.address])).to.equal(true);
-      expect(await nexus.read.allowedPresaleMinters([user2.account.address])).to.equal(false);
-      await nexus.write.setPresaleMinter([user1.account.address, false], { account: owner.account });
+    it("NEXUS isPresaleBonusContract is true for immutable presale bonus addresses only", async () => {
+      expect(await nexus.read.isPresaleBonusContract([user1.account.address])).to.equal(true);
+      expect(await nexus.read.isPresaleBonusContract([user2.account.address])).to.equal(true);
+      expect(await nexus.read.isPresaleBonusContract([owner.account.address])).to.equal(false);
     });
     it("NEXUS transfer reverts", async () => {
       await nexus.write.mint([owner.account.address, parseEther("100")], { account: owner.account });
@@ -788,12 +799,6 @@ describe("TCGVaultToken", () => {
       );
     });
 
-    it("NEXUS setPresaleMinter reverts when not owner", async () => {
-      await expectRevert(
-        nexus.write.setPresaleMinter([user1.account.address, true], { account: user1.account })
-      );
-    });
-
     it("NEXUS mintCashback reverts when not minter", async () => {
       await expectRevert(
         nexus.write.mintCashback([owner.account.address, parseEther("1")], { account: user1.account })
@@ -802,7 +807,11 @@ describe("TCGVaultToken", () => {
 
     it("NEXUS mintCashback reverts when recipient is zero or amount is zero", async () => {
       const testMinter = await viem.deployContract("TestNexusMinter", [], { client: { wallet: owner } });
-      const nexusMinter = await viem.deployContract("TCGNexusToken", [testMinter.address], { client: { wallet: owner } });
+      const nexusMinter = await viem.deployContract(
+        "TCGNexusToken",
+        [testMinter.address, user1.account.address, user2.account.address],
+        { client: { wallet: owner } },
+      );
       await nexusMinter.write.mint([owner.account.address, parseEther("100")], { account: owner.account });
       await expectRevert(
         testMinter.write.mintCashback(
@@ -820,20 +829,19 @@ describe("TCGVaultToken", () => {
 
     it("NEXUS mintPresaleBonus reverts when not presale minter", async () => {
       await expectRevert(
-        nexus.write.mintPresaleBonus([owner.account.address, parseEther("1")], { account: user1.account })
+        nexus.write.mintPresaleBonus([user1.account.address, parseEther("1")], { account: owner.account })
       );
     });
 
     it("NEXUS mintPresaleBonus reverts when recipient is zero", async () => {
-      await nexus.write.setPresaleMinter([owner.account.address, true], { account: owner.account });
       await expectRevert(
-        nexus.write.mintPresaleBonus([ZERO, parseEther("1")], { account: owner.account })
+        nexus.write.mintPresaleBonus([ZERO, parseEther("1")], { account: user1.account })
       );
     });
 
     it("NEXUS mintPresaleBonus reverts when amount is zero", async () => {
       await expectRevert(
-        nexus.write.mintPresaleBonus([owner.account.address, 0n], { account: owner.account })
+        nexus.write.mintPresaleBonus([owner.account.address, 0n], { account: user1.account })
       );
     });
 
@@ -1378,7 +1386,9 @@ describe("TCGVaultToken", () => {
         vault.account.address,
         marketing.account.address,
         community.account.address,
-        freshMock.address
+        freshMock.address,
+        freshMock.address,
+        owner.account.address,
       );
       await freshTcgv.write.pause({ account: owner.account });
       await expectRevert(
@@ -1419,8 +1429,10 @@ describe("TCGVaultToken", () => {
       const futureTcgv = getContractAddress({ from: owner.account.address, nonce: n0 + 2n });
       const futureStakingVault = getContractAddress({ from: owner.account.address, nonce: n0 + 3n });
 
-      // Deploy Nexus (minter = predicted TCGV).
-      await viem.deployContract("TCGNexusToken", [futureTcgv], { client: { wallet: owner } });
+      // Deploy Nexus (minter = predicted TCGV; presale bonus minters = test EOAs).
+      await viem.deployContract("TCGNexusToken", [futureTcgv, user1.account.address, user2.account.address], {
+        client: { wallet: owner },
+      });
 
       // Deploy token with stakingVault set to the predicted vault address.
       const freshTcgv = await viem.deployContract("TCGVaultToken", [
@@ -1472,7 +1484,9 @@ describe("TCGVaultToken", () => {
         vault.account.address,
         marketing.account.address,
         community.account.address,
-        freshMock.address
+        freshMock.address,
+        freshMock.address,
+        owner.account.address,
       );
       await freshTcgv.write.setAllocationRecipients([
         vault.account.address,

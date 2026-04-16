@@ -25,7 +25,7 @@ contract MockTCGVPresale is ERC20, Ownable {
         if (to != address(0) && amount > 0) _mint(to, amount);
     }
 
-    function burnPresale(address from, uint256 amount) external {
+    function burnPresaleAllocation(address from, uint256 amount) external {
         if (msg.sender != presaleFinalizer) revert OnlyPresaleFinalizer();
         if (from != address(0) && amount > 0) _burn(from, amount);
     }
