@@ -197,7 +197,7 @@ async function main() {
   console.log(`    TCGNexusToken: ${nexusTokenAddress}`);
   console.log();
 
-  console.log("1.3 Deploying TCGVaultToken (immutable NEXUS + presaleFinalizer + stakingVault)...");
+  console.log("1.3 Deploying TCGVaultToken (immutable NEXUS + initialLaunch + stakingVault)...");
   await viem.deployContract("TCGVaultToken", [
     stakingVaultAddress,
     PANCAKE_ROUTER,

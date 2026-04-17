@@ -18,7 +18,7 @@
  *
  * Flow:
  *   1. Deploy: TCGVaultToken, TCGNexusToken, TCGVaultFounderNFT, TCGVaultInitialLaunch, BuyRouter, Wrapper, TCGR, Converter (USDC = real BSC USDC).
- *   2. Fund all accounts with real USDC via storage cheatcode (token presaleFinalizer is immutable = InitialLaunch; NEXUS presale bonus minters set in Nexus constructor).
+ *   2. Fund all accounts with real USDC via storage cheatcode (token initialLaunch is immutable = InitialLaunch; NEXUS presale bonus minters set in Nexus constructor).
  *   3. Trader buys TCGV (wave 1).
  *   4. Mint 250 Founder NFTs (245 trader + 5 owner) so wave 2 starts; exhaust to 500; wave-2 buys; large-scale multiple buyers.
  *   5. Time travel 121h, finalize; assert buy() reverts (PresaleEnded).

@@ -59,7 +59,7 @@ async function runQueuedVerifications(jobs: VerifyJob[]): Promise<void> {
  * 5% Opérationnel & Marketing (immédiat), 11% Opérationnel & Marketing (vesting).
  * Post-deploy: wire presale (InitialLaunch or deploy script order) per whitepaper §5–§6.
  *
- * NEXUS cashback (whitepaper §6): presale finalizer is immutable in `TCGVaultToken` constructor — pass the launch contract address that will call `finalizePresaleAndRecompute()`.
+ * NEXUS cashback (whitepaper §6): `initialLaunch` is immutable in `TCGVaultToken` constructor — `PRESALE_FINALIZER` must be the `TCGVaultInitialLaunch` address that will call `finalizePresaleAndRecompute()`.
  *
  * Usage:
  *   yarn hardhat run scripts/deployTCGVault.ts --network <network>
@@ -70,7 +70,7 @@ async function runQueuedVerifications(jobs: VerifyJob[]): Promise<void> {
  *   - MARKETING_ADDRESS: Marketing address (required)
  *   - COMMUNITY_ADDRESS: Community rewards address (required)
  *   - STABLECOIN_ADDRESS: Stablecoin address (USDT/USDC). If omitted, deploy MockUSDC.
- *   - PRESALE_FINALIZER: Address allowed to call mintPresale / finalize (e.g. TCGVaultInitialLaunch) (required)
+ *   - PRESALE_FINALIZER: TCGVaultInitialLaunch address (immutable `initialLaunch`; mintPresale / finalize / burnPresaleAllocation) (required)
  *   - NEXUS_PRESALE_BONUS_FOUNDER_NFT, NEXUS_PRESALE_BONUS_INITIAL_LAUNCH: Immutable NEXUS presale bonus contracts (CREATE-predicted addresses) (required)
  *   - MOCK_USDC_MINT_DEPLOYER=0: if deploying MockUSDC, skip minting 1M USDC to deployer
  */
@@ -106,9 +106,9 @@ async function main() {
     return;
   }
   let stablecoinAddress = process.env.STABLECOIN_ADDRESS as Address | undefined;
-  const presaleFinalizer = process.env.PRESALE_FINALIZER?.trim() as `0x${string}` | undefined;
-  if (!presaleFinalizer) {
-    console.error("Missing PRESALE_FINALIZER env var. Refusing to deploy.");
+  const initialLaunchAddress = process.env.PRESALE_FINALIZER?.trim() as `0x${string}` | undefined;
+  if (!initialLaunchAddress) {
+    console.error("Missing PRESALE_FINALIZER env var (TCGVaultInitialLaunch address). Refusing to deploy.");
     return;
   }
   const nexusPresaleFounder = process.env.NEXUS_PRESALE_BONUS_FOUNDER_NFT?.trim() as Address | undefined;
@@ -142,7 +142,7 @@ async function main() {
     console.log("Using STABLECOIN_ADDRESS:", stablecoinAddress);
   }
 
-  // Deploy TCGNexusToken first (minter = predicted TCGV), then TCGVaultToken with immutable NEXUS + presale finalizer
+  // Deploy TCGNexusToken first (minter = predicted TCGV), then TCGVaultToken with immutable NEXUS + initialLaunch
   let nonce = BigInt(
     await publicClient.getTransactionCount({ address: deployer.account.address, blockTag: "pending" })
   );
@@ -169,7 +169,7 @@ async function main() {
     marketingAddress,
     communityAddress,
     nexusTokenAddress,
-    presaleFinalizer,
+    initialLaunchAddress,
   ], { client: { wallet: deployer } });
   const tokenAddress = getContractAddress({ from: deployer.account.address, nonce });
   nonce += 1n;
@@ -184,7 +184,7 @@ async function main() {
       marketingAddress,
       communityAddress,
       nexusTokenAddress,
-      presaleFinalizer,
+      initialLaunchAddress,
     ],
     contract: "contracts/TCGVaultToken.sol:TCGVaultToken",
   });

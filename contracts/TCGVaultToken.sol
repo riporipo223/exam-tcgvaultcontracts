@@ -15,8 +15,8 @@ error PairZeroAddress();
 error MinAmountNotMet(uint256 amount, uint256 minimum);
 /// @notice Only the buy router can call this.
 error OnlyBuyRouter();
-/// @notice Only the presale finalizer (e.g. launch contract) can call this.
-error OnlyPresaleFinalizer();
+/// @notice Only `TCGVaultInitialLaunch` (immutable `initialLaunch`) can call this.
+error OnlyInitialLaunch();
 /// @notice Supply already recomputed (one-time).
 error SupplyAlreadyRecomputed();
 /// @notice Presale not finalized yet.
@@ -67,7 +67,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     uint256 private constant CASHBACK_RATE_PRESALE = 3000; // 30%
     /// @notice Seconds per month for vesting (30 days).
     uint256 private constant SECONDS_PER_MONTH = 30 * 24 * 3600;
-    /// @notice When true, cashback uses 30%; when false (after presale finalize), uses 10%. Only set when presale finalizer calls finalizePresaleAndRecompute().
+    /// @notice When true, cashback uses 30%; when false (after presale finalize), uses 10%. Only set when `initialLaunch` calls finalizePresaleAndRecompute().
     bool public presaleActive = true;
 
     // Buy tax distribution (basis points of buy feeAmount; sum 10000)
@@ -92,8 +92,8 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     address public buyRouter;
     /// @notice Optional `TCGVaultStakingVault` over this token; when blacklisting, staked shares are redeemed to `vaultAddress` first.
     address public immutable stakingVault;
-    /// @notice Only this address can call finalizePresaleAndRecompute() and mintPresale(). Set once in constructor.
-    address public immutable presaleFinalizer;
+    /// @notice `TCGVaultInitialLaunch` (or test stand-in): only this address may mintPresale / finalize / burnPresaleAllocation paths guarded below. Immutable.
+    address public immutable initialLaunch;
     /// @notice True after recomputeSupplyAndBurn has been called (one-time; mints 20% liquidity, 4% team vesting, 5% ops direct, 11% ops vesting).
     bool public supplyRecomputed;
     /// @notice Recipients for post-presale mint (whitepaper §5: 20% liquidity, 4% team vesting, 16% ops). Set by owner before presale end.
@@ -186,7 +186,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         address marketingAddress_,
         address communityAddress_,
         address nexusToken_,
-        address presaleFinalizer_
+        address initialLaunch_
     ) ERC20("TCG-VAULT Token", "TCGV") {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(ADMIN_ROLE, msg.sender);
@@ -198,12 +198,12 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         }
         if (nexusToken_ == address(0)) revert ZeroAddress();
         if (dexRouter_ == address(0)) revert ZeroAddress();
-        if (presaleFinalizer_ == address(0)) revert ZeroAddress();
+        if (initialLaunch_ == address(0)) revert ZeroAddress();
         vaultAddress = vaultAddress_;
         marketingAddress = marketingAddress_;
         communityAddress = communityAddress_;
         _nexusToken = nexusToken_;
-        presaleFinalizer = presaleFinalizer_;
+        initialLaunch = initialLaunch_;
         stakingVault = stakingVault_;
 
         emit FeeRecipientsUpdated(vaultAddress_, marketingAddress_, communityAddress_);
@@ -422,11 +422,11 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     }
 
     /**
-     * @notice Mint TCGV during presale; only callable by presale finalizer (e.g. launch contract on each buy).
+     * @notice Mint TCGV during presale; only callable by `initialLaunch` (e.g. TCGVaultInitialLaunch on each buy).
      * @dev Separate from finalizePresaleAndRecompute: this is called many times (per purchase); finalize is called once at presale end to switch cashback and mint allocation buckets.
      */
     function mintPresale(address to, uint256 amount) external {
-        if (msg.sender != presaleFinalizer) revert OnlyPresaleFinalizer();
+        if (msg.sender != initialLaunch) revert OnlyInitialLaunch();
         if (to == address(0)) return;
         if (amount == 0) return;
         _mint(to, amount);
@@ -434,10 +434,10 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
 
     /**
      * @notice Finalize presale and recompute supply in a single call.
-     * @dev Only callable by presaleFinalizer (e.g. InitialLaunch.finalize). Switches cashback from 30% to 10%, then mints: 20% liquidity (direct), 4% team (vesting: 12mo cliff + 24mo monthly), 5% ops (direct), 11% ops (vesting: 36mo monthly, no cliff). Called once at presale end.
+     * @dev Only callable by `initialLaunch` (TCGVaultInitialLaunch.finalize). Switches cashback from 30% to 10%, then mints: 20% liquidity (direct), 4% team (vesting: 12mo cliff + 24mo monthly), 5% ops (direct), 11% ops (vesting: 36mo monthly, no cliff). Called once at presale end.
      */
     function finalizePresaleAndRecompute() external {
-        if (msg.sender != presaleFinalizer) revert OnlyPresaleFinalizer();
+        if (msg.sender != initialLaunch) revert OnlyInitialLaunch();
         if (supplyRecomputed) revert SupplyAlreadyRecomputed();
         if (!presaleActive) revert PresaleNotFinalized();
         if (liquidityRecipient == address(0) || teamRecipient == address(0) || opsRecipient == address(0)) revert AllocationRecipientsNotSet();
@@ -447,7 +447,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         emit PresaleActiveUpdated(false);
         emit PresaleFinalized();
 
-        uint256 presaleSold = ITCGVaultInitialLaunch(presaleFinalizer).totalTCGVAllocated();
+        uint256 presaleSold = ITCGVaultInitialLaunch(initialLaunch).totalTCGVAllocated();
         supplyRecomputed = true;
 
         if (presaleSold == 0) {
@@ -580,10 +580,10 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
 
     /**
      * @notice Burn presale allocations from `from` (e.g. cooling-off cancellations).
-     * @dev Used for MiCA cooling-off cancellations. Access: only `presaleFinalizer` (e.g. InitialLaunch).
+     * @dev Used for MiCA cooling-off cancellations. Access: only `initialLaunch`.
      */
     function burnPresaleAllocation(address from, uint256 amount) external {
-        if (msg.sender != presaleFinalizer) revert OnlyPresaleFinalizer();
+        if (msg.sender != initialLaunch) revert OnlyInitialLaunch();
         if (from == address(0)) revert ZeroAddress();
         if (amount == 0) return;
         _burn(from, amount);

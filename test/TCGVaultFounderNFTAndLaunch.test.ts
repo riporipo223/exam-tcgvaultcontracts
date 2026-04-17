@@ -55,7 +55,7 @@ async function deployIsolatedPresaleStack(
     { client: { wallet: deployer } },
   );
   const tcgvC = await viem.getContractAt("MockTCGVPresale", mockAddr);
-  await tcgvC.write.setPresaleFinalizer([launchAddr], { account: deployer.account });
+  await tcgvC.write.setInitialLaunch([launchAddr], { account: deployer.account });
   return {
     mockTcgv: tcgvC,
     nexus: await viem.getContractAt("TCGNexusToken", nexusAddr),
@@ -141,7 +141,7 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       owner.account.address,
     ], { client: { wallet: owner } });
 
-    await tcgv.write.setPresaleFinalizer([launchAddr], { account: owner.account });
+    await tcgv.write.setInitialLaunch([launchAddr], { account: owner.account });
   });
 
   describe("TCGVaultFounderNFT", () => {

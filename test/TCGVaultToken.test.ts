@@ -26,7 +26,7 @@ async function deployFreshTcgvWithNexus(
   vault: `0x${string}`,
   marketing: `0x${string}`,
   community: `0x${string}`,
-  presaleFinalizer: `0x${string}`,
+  initialLaunch: `0x${string}`,
   nexusPresaleBonusFounder: `0x${string}`,
   nexusPresaleBonusLaunch: `0x${string}`,
 ) {
@@ -44,7 +44,7 @@ async function deployFreshTcgvWithNexus(
     marketing,
     community,
     nexusAddr,
-    presaleFinalizer,
+    initialLaunch,
   ], { client: { wallet: owner } });
   return viem.getContractAt("TCGVaultToken", tcgvContract.address as `0x${string}`);
 }
@@ -132,7 +132,7 @@ describe("TCGVaultToken", () => {
     routerAddress = routerContract.address as `0x${string}`;
     router = await viem.getContractAt("MockUniswapV2Router", routerAddress);
 
-    // Deploy mock presale launch first; TCGV stores it as immutable finalizer.
+    // Deploy mock presale launch first; TCGV stores it as immutable initialLaunch.
     mockPresaleLaunch = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], { client: { wallet: owner } });
 
     // Deploy TCGNexusToken first (minter = predicted TCGV), then TCGV with immutable NEXUS
@@ -616,7 +616,7 @@ describe("TCGVaultToken", () => {
   });
 
   describe("Presale finalization and dynamic burn", () => {
-    it("finalizePresaleAndRecompute reverts when caller is not presaleFinalizer", async () => {
+    it("finalizePresaleAndRecompute reverts when caller is not initialLaunch", async () => {
       let reverted = false;
       try {
         await tcgv.write.finalizePresaleAndRecompute({ account: user1.account });
@@ -644,11 +644,11 @@ describe("TCGVaultToken", () => {
       );
     });
 
-    it("presaleFinalizer is immutable and set at deployment", async () => {
-      expect(getAddress(await tcgv.read.presaleFinalizer())).to.equal(getAddress(mockPresaleLaunch.address));
+    it("initialLaunch is immutable and set at deployment", async () => {
+      expect(getAddress(await tcgv.read.initialLaunch())).to.equal(getAddress(mockPresaleLaunch.address));
     });
 
-    it("mintPresale reverts OnlyPresaleFinalizer when caller is not finalizer", async () => {
+    it("mintPresale reverts OnlyInitialLaunch when caller is not initialLaunch", async () => {
       await expectRevert(
         tcgv.write.mintPresale([user1.account.address, parseEther("100")], { account: user1.account })
       );
@@ -1421,7 +1421,7 @@ describe("TCGVaultToken", () => {
       const publicClient = await viem.getPublicClient();
       const n0 = BigInt(await publicClient.getTransactionCount({ address: owner.account.address, blockTag: "pending" }));
 
-      // Deploy a fresh presale finalizer (mock) first, so TCGV can set it immutable.
+      // Deploy a fresh initialLaunch stand-in (mock) first, so TCGV can set it immutable.
       const freshMock = await viem.deployContract("contracts/test/MockPresaleLaunch.sol:MockPresaleLaunch", [], { client: { wallet: owner } });
 
       // Predict addresses for TCGNexusToken (nonce n0+1), TCGV (nonce n0+2), and staking vault (nonce n0+3).
@@ -1454,7 +1454,7 @@ describe("TCGVaultToken", () => {
       const vaultAddr = (await freshTcgvClient.read.vaultAddress()) as `0x${string}`;
       const stakeAmt = parseEther("77");
 
-      // Mint TCGV to user2 via presaleFinalizer and stake it.
+      // Mint TCGV to user2 via initialLaunch (mock) and stake it.
       await freshMock.write.mintPresale([freshTcgv.address, user2.account.address, stakeAmt], { account: owner.account });
       await freshTcgvClient.write.approve([stakingVault.address, stakeAmt], { account: user2.account });
       await stakingVault.write.deposit([stakeAmt, user2.account.address], { account: user2.account });
