@@ -30,6 +30,8 @@
  *   - DEPLOY_RECEIPT_TIMEOUT_MS — per-attempt waitForTransactionReceipt timeout (default: 300000)
  *   - DEPLOY_RECEIPT_POLL_MS — polling interval ms (default: 4000; slower helps flaky BSC testnet RPCs)
  *   - DEPLOY_RECEIPT_MAX_ATTEMPTS — retries when receipt is missing (default: 5)
+ *   - DEPLOY_RETRY_GAS_LIMIT — fallback gas limit for deployment tx when RPC auto-estimation fails
+ *     with "out of gas: gas required exceeds ..." (default: 3000000)
  *
  * Gas (BSC testnet):
  *   - If txs fail with "transaction underpriced", set BSCTEST_GAS_PRICE_WEI in .env (wei), e.g.
@@ -146,6 +148,7 @@ async function main() {
   const receiptTimeoutMs = Number(process.env.DEPLOY_RECEIPT_TIMEOUT_MS ?? 300_000);
   const receiptPollMs = Number(process.env.DEPLOY_RECEIPT_POLL_MS ?? 4_000);
   const receiptMaxAttempts = Math.max(1, Number(process.env.DEPLOY_RECEIPT_MAX_ATTEMPTS ?? 5));
+  const deployRetryGasLimit = BigInt(process.env.DEPLOY_RETRY_GAS_LIMIT?.trim() ?? "3000000");
 
   /**
    * BSC testnet RPCs often lag or return null receipts briefly; viem's default timeout/poll
@@ -186,14 +189,47 @@ async function main() {
     constructorArgs: readonly unknown[] = [],
     deployConfig: { client?: { wallet: typeof deployer } } = {},
   ): Promise<{ address: Address }> {
-    const { contract, deploymentTransaction } = await viem.sendDeploymentTransaction(
-      contractName as never,
-      constructorArgs as never,
-      deployConfig as never,
-    );
-    const receipt = await waitForTxReceipt(deploymentTransaction.hash);
+    /**
+     * Avoid `viem.sendDeploymentTransaction()` here: it does an immediate
+     * `eth_getTransactionByHash`, which is flaky on BSC testnet RPCs and can throw
+     * `TransactionNotFoundError` even though the tx was accepted.
+     *
+     * We deploy from bytecode, then wait for the receipt directly.
+     */
+    const artifact = await hre.artifacts.readArtifact(contractName);
+    const wallet = deployConfig.client?.wallet ?? deployer;
+    let deploymentTxHash: `0x${string}`;
+    try {
+      deploymentTxHash = await wallet.deployContract({
+        abi: artifact.abi as never,
+        bytecode: artifact.bytecode as `0x${string}`,
+        args: constructorArgs as never,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const isGasEstimationFailure =
+        msg.includes("out of gas") ||
+        msg.includes("gas required exceeds") ||
+        msg.includes("Transaction creation failed");
+      if (!isGasEstimationFailure) {
+        throw e;
+      }
+      console.warn(
+        `[deploy] ${contractName} failed during automatic gas estimation. Retrying with explicit gas=${deployRetryGasLimit.toString()}...`,
+      );
+      deploymentTxHash = await wallet.deployContract({
+        abi: artifact.abi as never,
+        bytecode: artifact.bytecode as `0x${string}`,
+        args: constructorArgs as never,
+        gas: deployRetryGasLimit,
+      });
+    }
+    const receipt = await waitForTxReceipt(deploymentTxHash);
+    if (!receipt.contractAddress) {
+      throw new Error(`Deployment receipt missing contractAddress for ${contractName} (${deploymentTxHash}).`);
+    }
     deploymentBlocks.push(receipt.blockNumber);
-    return contract as { address: Address };
+    return { address: receipt.contractAddress as Address };
   }
 
   const deployerAddr = deployer.account.address as Address;
@@ -250,8 +286,8 @@ async function main() {
     if (process.env.MOCK_USDC_MINT_DEPLOYER !== "0") {
       const m = await viem.getContractAt("contracts/test/MockUSDC.sol:MockUSDC", usdcAddress);
       const mintAmt = 1_000_000n * USDC_6;
-      const h = await m.write.mint([deployerAddr, mintAmt], { account: deployer.account });
-      await waitForTxReceipt(h);
+      const mintHash = await m.write.mint([deployerAddr, mintAmt], { account: deployer.account });
+      await waitForTxReceipt(mintHash);
       console.log(`Minted ${Number(mintAmt) / 1e6} USDC to deployer for tests.`);
     }
     verifyJobs.push({
@@ -349,6 +385,7 @@ async function main() {
 
   const nexusToken = await viem.getContractAt("TCGNexusToken", nexusTokenAddress);
   const token = await viem.getContractAt("TCGVaultToken", tokenAddress);
+  let h: `0x${string}`;
 
   console.log("--- Allocation recipients (pre-presale finalize) ---");
   console.log("Liquidity recipient:", liquidityRecipient);
