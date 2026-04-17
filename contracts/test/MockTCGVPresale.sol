@@ -3,9 +3,10 @@ pragma solidity 0.8.27;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 /// @notice Mock TCGV for tests: ERC20 with mintPresale(to, amount) callable by initialLaunch (e.g. InitialLaunch).
-contract MockTCGVPresale is ERC20, Ownable {
+contract MockTCGVPresale is ERC20, Ownable2Step {
     address public initialLaunch;
 
     error OnlyInitialLaunch();

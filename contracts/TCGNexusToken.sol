@@ -2,6 +2,7 @@
 pragma solidity 0.8.27;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
 import {ERC20Votes} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
@@ -14,7 +15,7 @@ import {Nonces} from "@openzeppelin/contracts/utils/Nonces.sol";
  *      ERC-5805 / ERC20Votes for Tally.xyz and OZ Governor compatibility. EIP712 via ERC20Permit for delegateBySig.
  *      Obtention : cashback TCGV (minter) + bonus 30% prévente (immutable FounderNFT + InitialLaunch only).
  */
-contract TCGNexusToken is ERC20Permit, ERC20Votes, Ownable {
+contract TCGNexusToken is ERC20Permit, ERC20Votes, Ownable2Step {
     /// @notice Minter can only be the TCGVaultToken contract.
     error OnlyMinter();
     /// @notice Caller is neither FounderNFT nor InitialLaunch presale bonus contract.

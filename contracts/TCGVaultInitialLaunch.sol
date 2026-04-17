@@ -2,6 +2,7 @@
 pragma solidity 0.8.27;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {ITCGVaultFounderNFT} from "./interfaces/ITCGVaultFounderNFT.sol";
@@ -17,7 +18,7 @@ import {ITCGVaultToken} from "./interfaces/ITCGVaultToken.sol";
  * @dev Uses classic ReentrancyGuard instead of ReentrancyGuardTransient for compatibility
  *      with chains (e.g. BSC) that do not yet support EIP-1153 transient storage opcodes.
  */
-contract TCGVaultInitialLaunch is Ownable, ReentrancyGuard {
+contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
     IERC20 private immutable _tcgv;
     IERC20 private immutable _usdc;
     ITCGVaultFounderNFT private immutable _founderNFT;
@@ -73,7 +74,7 @@ contract TCGVaultInitialLaunch is Ownable, ReentrancyGuard {
 
     event Bought(address user, uint256 usdcAmount, uint256 tcgvAllocated, uint256 orderId, uint256 purchasedAt);
     event Claimed(address user, uint256 amount);
-    event PresaleOrderCancelled(address indexed user, uint256 indexed orderId, uint256 usdcRefundDue, uint256 tcgvBurned, uint256 nexusClawedBack);
+    event PresaleOrderCancelled(address user, uint256 orderId, uint256 usdcRefundDue, uint256 tcgvBurned, uint256 nexusClawedBack);
     event Finalized(uint256 tgeTimestamp);
     event TreasuryUpdated(address treasury);
 

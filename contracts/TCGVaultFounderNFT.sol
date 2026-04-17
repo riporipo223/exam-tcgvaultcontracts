@@ -3,6 +3,7 @@ pragma solidity 0.8.27;
 
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {ITCGNexusToken} from "./interfaces/ITCGNexusToken.sol";
@@ -15,7 +16,7 @@ import {ITCGNexusToken} from "./interfaces/ITCGNexusToken.sol";
  *
  * @dev Uses classic ReentrancyGuard so Anvil/other forks work with a plain --fork-url (no --hardfork cancun required).
  */
-contract TCGVaultFounderNFT is ERC721, Ownable, ReentrancyGuard {
+contract TCGVaultFounderNFT is ERC721, Ownable2Step, ReentrancyGuard {
     IERC20 private immutable _usdc;
     ITCGNexusToken private immutable _nexusToken;
 
@@ -58,8 +59,8 @@ contract TCGVaultFounderNFT is ERC721, Ownable, ReentrancyGuard {
 
     event CaspUsdcRecipientUpdated(address caspUsdcRecipient);
     event BaseURIUpdated(string baseURI);
-    event FounderMinted(address indexed buyer, uint256 indexed tokenId, uint256 usdcAmount, uint256 nexusAmount, uint256 purchasedAt);
-    event FounderPurchaseCancelled(address indexed buyer, uint256 indexed tokenId, uint256 usdcRefundDue, uint256 nexusClawedBack);
+    event FounderMinted(address buyer, uint256 tokenId, uint256 usdcAmount, uint256 nexusAmount, uint256 purchasedAt);
+    event FounderPurchaseCancelled(address buyer, uint256 tokenId, uint256 usdcRefundDue, uint256 nexusClawedBack);
 
     constructor(address usdc_, address nexusToken_, address caspUsdcRecipient_)
         ERC721("TCG-VAULT Founder", "TCGVF")

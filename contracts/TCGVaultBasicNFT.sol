@@ -3,6 +3,7 @@ pragma solidity 0.8.27;
 
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ITCGVaultStakingVault} from "./interfaces/ITCGVaultStakingVault.sol";
 
 /**
@@ -10,7 +11,7 @@ import {ITCGVaultStakingVault} from "./interfaces/ITCGVaultStakingVault.sol";
  * @notice Édition basique — ticket d'entrée (whitepaper §7.2). Soulbound, non-transferable.
  *   Minted automatically when user has >= minStake (e.g. ~25$ TCGV) staked; burned when stake drops below (via staking vault).
  */
-contract TCGVaultBasicNFT is ERC721, Ownable {
+contract TCGVaultBasicNFT is ERC721, Ownable2Step {
     ITCGVaultStakingVault private _stakingVault;
     uint256 private _nextTokenId;
     /// @notice Base URI for tokenURI (set by owner; used by explorers/marketplaces).

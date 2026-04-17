@@ -2,6 +2,7 @@
 pragma solidity 0.8.27;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /**
@@ -11,7 +12,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
  *      Seuls les achats validés via le BuyRouter déclenchent 0,5 % en TCGR pour le parrain (whitepaper).
  *      L'owner peut bannir un parrain ou un filleul du programme (fraude) : plus de récompenses TCGR pour ces achats.
  */
-contract TCGRToken is ERC20, Ownable {
+contract TCGRToken is ERC20, Ownable2Step {
     error OnlyMinter();
     error OnlyConverter();
     error ZeroAddress();
@@ -33,9 +34,9 @@ contract TCGRToken is ERC20, Ownable {
     /// @notice If true, `processValidatedBuy` pays no TCGR for this address as buyer and mints nothing to this address as referrer.
     mapping(address account => bool) private _bannedFromReferralProgram;
 
-    event ReferrerBound(address indexed referee, address indexed referrer);
-    event ReferralRewarded(address indexed referee, address indexed referrer, uint256 amount);
-    event ReferralProgramBanUpdated(address indexed account, bool banned);
+    event ReferrerBound(address referee, address referrer);
+    event ReferralRewarded(address referee, address referrer, uint256 amount);
+    event ReferralProgramBanUpdated(address account, bool banned);
     event Converted(address account, uint256 amount);
     event MinterUpdated(address minter);
     event ConverterUpdated(address converter);

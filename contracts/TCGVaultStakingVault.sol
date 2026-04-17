@@ -5,6 +5,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ITCGVaultBasicNFT} from "./interfaces/ITCGVaultBasicNFT.sol";
 import {ITCGVaultToken} from "./interfaces/ITCGVaultToken.sol";
 
@@ -19,7 +20,7 @@ error OnlyAssetToken();
  *   On withdraw/redeem, if owner's share balance falls below minStakeForBasicNFT, their Basic NFT(s) are burned.
  *   Withdraw/redeem revert if the share `owner` is blacklisted on `ITCGVaultToken(asset())`. The asset token may call `forceWithdrawFromBlacklist` during blacklist to redeem all shares to the protocol vault.
  */
-contract TCGVaultStakingVault is ERC4626, Ownable {
+contract TCGVaultStakingVault is ERC4626, Ownable2Step {
     event MinStakeForBasicNFTUpdated(uint256 minShares);
     event BasicNFTContractUpdated(address basicNFT);
     /// @notice Minimum shares required to hold a Basic NFT. Below this, Basic NFT is burned on withdraw.

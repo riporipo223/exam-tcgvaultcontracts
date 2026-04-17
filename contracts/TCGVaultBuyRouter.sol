@@ -2,6 +2,7 @@
 pragma solidity 0.8.27;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ITCGVaultToken} from "./interfaces/ITCGVaultToken.sol";
@@ -35,7 +36,7 @@ error ZeroAddress();
  * @dev This contract is excluded from fees in TCGVaultToken. Cashback rate is determined by TCGVaultToken (presaleActive).
  *      Uses {ReentrancyGuardTransient} (EIP-1153) for buy/sell entrypoints; requires a chain that supports transient storage.
  */
-contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
+contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
     /// @notice Hard cap for configurable buy/sell tax rates (25%).
     uint256 public constant MAX_FEE_BP = 2500;
 
@@ -61,7 +62,7 @@ contract TCGVaultBuyRouter is Ownable, ReentrancyGuardTransient {
     address private immutable _community;
     ITCGRToken private _referralToken;
 
-    event BuyWithUSDC(address indexed buyer, uint256 usdcIn, uint256 feeUSDC, uint256 tcgvOut);
+    event BuyWithUSDC(address buyer, uint256 usdcIn, uint256 feeUSDC, uint256 tcgvOut);
     event ReferralTokenSet(address token);
     event SellTCGVForUSDC(address seller, uint256 tcgvIn, uint256 feeTCGV, uint256 usdcOut);
     event BuyFeeParamsUpdated(uint256 vaultBp, uint256 marketingBp, uint256 communityBp);

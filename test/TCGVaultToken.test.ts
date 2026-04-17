@@ -778,7 +778,8 @@ describe("TCGVaultToken", () => {
       expect(await nexus.read.isPresaleBonusContract([owner.account.address])).to.equal(false);
     });
     it("NEXUS transfer reverts", async () => {
-      await nexus.write.mint([owner.account.address, parseEther("100")], { account: owner.account });
+      // Mint through an authorized presale bonus contract address so owner has a balance.
+      await nexus.write.mintPresaleBonus([owner.account.address, parseEther("100")], { account: user1.account });
       let reverted = false;
       try {
         await nexus.write.transfer([user1.account.address, parseEther("1")], { account: owner.account });
@@ -812,7 +813,6 @@ describe("TCGVaultToken", () => {
         [testMinter.address, user1.account.address, user2.account.address],
         { client: { wallet: owner } },
       );
-      await nexusMinter.write.mint([owner.account.address, parseEther("100")], { account: owner.account });
       await expectRevert(
         testMinter.write.mintCashback(
           [nexusMinter.address as `0x${string}`, ZERO, parseEther("1")],

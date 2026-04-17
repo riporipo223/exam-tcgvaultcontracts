@@ -2,6 +2,7 @@
 pragma solidity 0.8.27;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ITCGRToken} from "./interfaces/ITCGRToken.sol";
@@ -11,7 +12,7 @@ import {ITCGRToken} from "./interfaces/ITCGRToken.sol";
  * @notice Convert TCGR (referral token, soulbound) into TCGV at a fixed ratio by burning TCGR and sending TCGV from this contract's treasury.
  * @dev Contract must be funded with TCGV. Ratio: amountTcgv = (amountTcgr * ratio) / 1e18 (both 18 decimals).
  */
-contract TCGRToTCGVConverter is Ownable {
+contract TCGRToTCGVConverter is Ownable2Step {
     using SafeERC20 for IERC20;
 
     IERC20 private immutable _tcgr;

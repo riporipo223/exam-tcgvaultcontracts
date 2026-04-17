@@ -3,6 +3,7 @@ pragma solidity 0.8.27;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {IRouter} from "./interfaces/IRouter.sol";
 
 /// @notice Router not in the allowed list.
@@ -16,7 +17,7 @@ error RouterNotAllowed();
  *      Removing liquidity uses `to = address(this)` on the router, then this contract forwards tokens to the user
  *      so the pair→EOA transfer (otherwise taxed as a “buy”) never happens on-chain.
  */
-contract TCGVaultLiquidityWrapper is Ownable {
+contract TCGVaultLiquidityWrapper is Ownable2Step {
     event AllowedRouterUpdated(address router, bool allowed);
 
     /// @notice The TCGV token this wrapper pulls and forwards.
