@@ -46,6 +46,7 @@ async function mintTcgrToUser(
 ) {
   await tcgr.write.setReferrer([userAddr], { account: referee.account });
   await tcgr.write.processValidatedBuy([referee.account.address, usdc6ForTcgrReward(tcgrWei)], { account: minter.account });
+  await networkHelpers.time.increase(30n * 24n * 60n * 60n + 1n);
 }
 
 describe("TCGRToTCGVConverter", function () {

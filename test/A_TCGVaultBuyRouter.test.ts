@@ -126,6 +126,10 @@ describe("TCGVaultBuyRouter", function () {
   it("buyTCGVWithUSDC mints 0.5% TCGR to registered referrer when referral token is set", async function () {
     const { owner, user1, tcgv, buyRouter, usdc } = await networkHelpers.loadFixture(deployFixture);
     const tcgr = await viem.deployContract("TCGRToken", [buyRouter.address], { client: { wallet: owner } });
+    const qualifyingNft = await viem.deployContract("contracts/test/MockQualifyingNFT.sol:MockQualifyingNFT", [], {
+      client: { wallet: owner },
+    });
+    await tcgr.write.setQualifyingNft([qualifyingNft.address], { account: owner.account });
     await buyRouter.write.setReferralToken([tcgr.address], { account: owner.account });
 
     const referrer = owner;
@@ -133,6 +137,7 @@ describe("TCGVaultBuyRouter", function () {
     const usdcIn = parseUnits("1000", 6);
     const expectedReferral = (usdcIn * 10n ** 12n * 50n) / 10000n; // 0.5%, scaled to 18 decimals
 
+    await qualifyingNft.write.mint([referrer.account.address], { account: owner.account });
     await tcgr.write.setReferrer([referrer.account.address], { account: buyer.account });
     const tcgrBefore = await tcgr.read.balanceOf([referrer.account.address]);
     await usdc.write.mint([buyer.account.address, usdcIn], { account: owner.account });

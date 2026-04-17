@@ -21,7 +21,13 @@ async function deployFixture() {
   const referrer = wallets[2]!;
   const referee = wallets[3]!;
   const tcgr = await viem.deployContract("TCGRToken", [minter.account.address], { client: { wallet: owner } });
-  return { owner, minter, referrer, referee, tcgr };
+  const qualifyingNft = await viem.deployContract("contracts/test/MockQualifyingNFT.sol:MockQualifyingNFT", [], {
+    client: { wallet: owner },
+  });
+  await tcgr.write.setQualifyingNft([qualifyingNft.address], { account: owner.account });
+  await qualifyingNft.write.mint([owner.account.address], { account: owner.account });
+  await qualifyingNft.write.mint([referrer.account.address], { account: owner.account });
+  return { owner, minter, referrer, referee, tcgr, qualifyingNft };
 }
 
 /** Mint tcgrWei to `recipient` via processValidatedBuy(referee, usdc). */
@@ -58,6 +64,11 @@ describe("TCGRToken", function () {
   it("returns minter set at deployment", async function () {
     const { tcgr, minter } = await networkHelpers.loadFixture(deployFixture);
     assert.strictEqual((await tcgr.read.minter()).toLowerCase(), minter.account.address.toLowerCase());
+  });
+
+  it("uses 30-day referral vesting bucket", async function () {
+    const { tcgr } = await networkHelpers.loadFixture(deployFixture);
+    assert.strictEqual(await tcgr.read.REFERRAL_VESTING_BUCKET(), 30n * 24n * 60n * 60n);
   });
 
   it("only minter can call processValidatedBuy", async function () {
@@ -211,6 +222,18 @@ describe("TCGRToken", function () {
     assert.strictEqual(await tcgr.read.converter(), zeroAddress);
   });
 
+  it("processValidatedBuy no-op when qualifying NFT is required but referrer has none", async function () {
+    const { tcgr, owner, minter, referee, qualifyingNft } = await networkHelpers.loadFixture(deployFixture);
+    const wallets = await viem.getWalletClients();
+    const nonHolderReferrer = wallets[5]!;
+    await tcgr.write.setReferrer([nonHolderReferrer.account.address], { account: referee.account });
+    await tcgr.write.setQualifyingNft([qualifyingNft.address], { account: owner.account });
+    await tcgr.write.processValidatedBuy([referee.account.address, usdc6ForTcgrReward(parseEther("10"))], {
+      account: minter.account,
+    });
+    assert.strictEqual(await tcgr.read.balanceOf([nonHolderReferrer.account.address]), 0n);
+  });
+
   it("only converter can call burnForConversion", async function () {
     const { tcgr, owner, minter, referrer, referee } = await networkHelpers.loadFixture(deployFixture);
     await rewardReferrer(tcgr, minter, referee, referrer.account.address, parseEther("100"));
@@ -246,6 +269,7 @@ describe("TCGRToken", function () {
   it("burnForConversion reverts when insufficient balance", async function () {
     const { tcgr, owner, minter, referrer, referee } = await networkHelpers.loadFixture(deployFixture);
     await rewardReferrer(tcgr, minter, referee, referrer.account.address, parseEther("10"));
+    await networkHelpers.time.increase(30n * 24n * 60n * 60n + 1n);
     const mockTcgv = await viem.deployContract("contracts/test/MockTCGVPresale.sol:MockTCGVPresale", [], { client: { wallet: owner } });
     await mockTcgv.write.mint([owner.account.address, parseEther("1000")], { account: owner.account });
     const converterContract = await viem.deployContract("TCGRToTCGVConverter", [
@@ -266,6 +290,7 @@ describe("TCGRToken", function () {
   it("convert reverts when TCGR allowance to converter is insufficient", async function () {
     const { tcgr, owner, minter, referrer, referee } = await networkHelpers.loadFixture(deployFixture);
     await rewardReferrer(tcgr, minter, referee, referrer.account.address, parseEther("50"));
+    await networkHelpers.time.increase(30n * 24n * 60n * 60n + 1n);
     const mockTcgv = await viem.deployContract("contracts/test/MockTCGVPresale.sol:MockTCGVPresale", [], { client: { wallet: owner } });
     await mockTcgv.write.mint([owner.account.address, parseEther("1000")], { account: owner.account });
     const converterContract = await viem.deployContract("TCGRToTCGVConverter", [
@@ -281,6 +306,51 @@ describe("TCGRToken", function () {
       tcgr,
       "ERC20InsufficientAllowance"
     );
+  });
+
+  it("burnForConversion reverts when amount is not yet unlocked this month", async function () {
+    const { tcgr, owner, minter, referrer, referee } = await networkHelpers.loadFixture(deployFixture);
+    await rewardReferrer(tcgr, minter, referee, referrer.account.address, parseEther("10"));
+    const mockTcgv = await viem.deployContract("contracts/test/MockTCGVPresale.sol:MockTCGVPresale", [], {
+      client: { wallet: owner },
+    });
+    await mockTcgv.write.mint([owner.account.address, parseEther("100")], { account: owner.account });
+    const converterContract = await viem.deployContract(
+      "TCGRToTCGVConverter",
+      [tcgr.address, mockTcgv.address, parseEther("1")],
+      { client: { wallet: owner } },
+    );
+    await tcgr.write.setConverter([converterContract.address], { account: owner.account });
+    await mockTcgv.write.transfer([converterContract.address, parseEther("100")], { account: owner.account });
+    await tcgr.write.approve([converterContract.address, parseEther("1")], { account: referrer.account });
+    await viem.assertions.revertWithCustomError(
+      converterContract.write.convert([parseEther("1")], { account: referrer.account }),
+      tcgr,
+      "InsufficientUnlockedBalance"
+    );
+  });
+
+  it("burnForConversion succeeds after moving into next referral bucket", async function () {
+    const { tcgr, owner, minter, referrer, referee } = await networkHelpers.loadFixture(deployFixture);
+    const amount = parseEther("10");
+    await rewardReferrer(tcgr, minter, referee, referrer.account.address, amount);
+    await networkHelpers.time.increase(30n * 24n * 60n * 60n + 1n);
+
+    const mockTcgv = await viem.deployContract("contracts/test/MockTCGVPresale.sol:MockTCGVPresale", [], {
+      client: { wallet: owner },
+    });
+    await mockTcgv.write.mint([owner.account.address, parseEther("100")], { account: owner.account });
+    const converterContract = await viem.deployContract("TCGRToTCGVConverter", [
+      tcgr.address,
+      mockTcgv.address,
+      parseEther("1"),
+    ], { client: { wallet: owner } });
+    await tcgr.write.setConverter([converterContract.address], { account: owner.account });
+    await mockTcgv.write.transfer([converterContract.address, parseEther("100")], { account: owner.account });
+    await tcgr.write.approve([converterContract.address, amount], { account: referrer.account });
+    await converterContract.write.convert([amount], { account: referrer.account });
+
+    assert.strictEqual(await tcgr.read.balanceOf([referrer.account.address]), 0n);
   });
 
   it("setBannedFromReferralProgram: only owner", async function () {
