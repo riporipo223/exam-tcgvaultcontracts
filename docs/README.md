@@ -154,4 +154,3 @@ Notable events: `FeeRecipientsUpdated`, `MinAmountsUpdated`, `FeesEnabledUpdated
 
 - `FeesDistributed` — Buy/sell fee splits applied
 - `CashbackDistributed` — NEXUS cashback minted
-- `LiquidityAdded` — Optional integration hook if used

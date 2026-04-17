@@ -146,7 +146,6 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         uint256 lpAmount
     );
     event CashbackDistributed(address recipient, uint256 amount);
-    event LiquidityAdded(uint256 tokenAmount, uint256 ethAmount);
     event BuyFeeParamsUpdated(
         uint256 buyTaxBp,
         uint256 vaultShareBp,
