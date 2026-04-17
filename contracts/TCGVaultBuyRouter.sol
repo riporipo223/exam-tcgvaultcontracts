@@ -13,12 +13,6 @@ import {IPancakeFactory, IPancakePair, IPancakeRouter02} from "./interfaces/IPan
 error ZeroUSDC();
 /// @notice Sent when selling with zero TCGV.
 error ZeroTCGV();
-/// @notice USDC transfer to vault failed.
-error VaultTransferFailed();
-/// @notice USDC transfer to marketing failed.
-error MarketingTransferFailed();
-/// @notice USDC transfer to community failed.
-error CommunityTransferFailed();
 /// @notice No TCGV received from swap.
 error NoTCGVReceived();
 /// @notice Output amount is less than minimum required.
@@ -338,10 +332,10 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
 
         // Split and transfer USDC fees
         if (feeUsdc > 0) {
-            uint256 autolpUsdc = (feeUsdc * _sellAutolpShareBp) / 10000;
             uint256 vaultUsdc = (feeUsdc * _sellVaultShareBp) / 10000;
+            uint256 autolpUsdc = (feeUsdc * _sellAutolpShareBp) / 10000;
             uint256 marketingUsdc = (feeUsdc * _sellMarketingShareBp) / 10000;
-            uint256 communityUsdc = (feeUsdc * _sellCommunityShareBp) / 10000;
+            uint256 communityUsdc = feeUsdc - vaultUsdc - autolpUsdc - marketingUsdc;
 
             if (vaultUsdc > 0) _pendingUsdcFees[_vault] += vaultUsdc;
             if (autolpUsdc > 0) _pendingUsdcFees[_vault] += autolpUsdc;

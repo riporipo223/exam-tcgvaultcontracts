@@ -669,10 +669,9 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     function _distributeBuyFeesFrom(address from, uint256 totalFee) private {
         uint256 vaultAmount = (totalFee * BUY_VAULT_SHARE) / 10000;
         uint256 marketingAmount = (totalFee * BUY_MARKETING_SHARE) / 10000;
-        uint256 autolpAmount = (totalFee * BUY_AUTOLP_SHARE) / 10000;
-        uint256 feeToCollect = vaultAmount + marketingAmount + autolpAmount;
+        uint256 autolpAmount = totalFee - vaultAmount - marketingAmount;
 
-        if (feeToCollect > 0) super._update(from, address(this), feeToCollect);
+        if (totalFee > 0) super._update(from, address(this), totalFee);
         if (vaultAmount > 0) pendingFeeClaims[vaultAddress] += vaultAmount;
         if (marketingAmount > 0) pendingFeeClaims[marketingAddress] += marketingAmount;
         if (autolpAmount > 0) pendingAutolp += autolpAmount;
@@ -686,10 +685,9 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         uint256 vaultAmount = (totalFee * SELL_VAULT_SHARE) / 10000;
         uint256 autolpAmount = (totalFee * SELL_AUTOLP_SHARE) / 10000;
         uint256 marketingAmount = (totalFee * SELL_MARKETING_SHARE) / 10000;
-        uint256 communityAmount = (totalFee * SELL_COMMUNITY_SHARE) / 10000;
-        uint256 feeToCollect = vaultAmount + autolpAmount + marketingAmount + communityAmount;
+        uint256 communityAmount = totalFee - vaultAmount - autolpAmount - marketingAmount;
 
-        if (feeToCollect > 0) super._update(from, address(this), feeToCollect);
+        if (totalFee > 0) super._update(from, address(this), totalFee);
         if (vaultAmount > 0) pendingFeeClaims[vaultAddress] += vaultAmount;
         if (autolpAmount > 0) pendingAutolp += autolpAmount;
         if (marketingAmount > 0) pendingFeeClaims[marketingAddress] += marketingAmount;

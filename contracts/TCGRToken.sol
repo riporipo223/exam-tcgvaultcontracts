@@ -49,7 +49,6 @@ contract TCGRToken is ERC20, Ownable2Step {
     error OnlyMinter();
     error OnlyConverter();
     error ZeroAddress();
-    error ZeroAmount();
     error SoulboundTransferNotAllowed();
     error InsufficientBalance();
     error InsufficientUnlockedBalance();
