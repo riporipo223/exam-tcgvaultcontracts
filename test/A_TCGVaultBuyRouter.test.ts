@@ -235,7 +235,7 @@ describe("TCGVaultBuyRouter", function () {
     } catch {
       reverted = true;
     }
-    assert.ok(reverted, "sellTCGVForBNB should revert when amountOutMin exceeds possible BNB out");
+    assert.ok(reverted, "sellTCGVForUSDC should revert when amountOutMin exceeds possible USDC out");
   });
 
   it("BuyRouter getters return correct addresses and params", async function () {

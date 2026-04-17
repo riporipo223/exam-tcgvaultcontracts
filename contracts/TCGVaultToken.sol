@@ -88,7 +88,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     address public communityAddress;
     /// @notice TCG-NEXUS for cashback (immutable; set once in constructor).
     address private immutable _nexusToken;
-    /// @notice When set, buys through this router charge fee in BNB (router path); only this address can call recordBuyAndMintCashback.
+    /// @notice Optional USDC-path buy router integration; only this address can call `recordBuyAndMintCashback`.
     address public buyRouter;
     /// @notice Optional `TCGVaultStakingVault` over this token; when blacklisting, staked shares are redeemed to `vaultAddress` first.
     address public immutable stakingVault;
@@ -174,7 +174,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     event DexRouterUpdated(address router, address factory, bool active);
     /// @notice Post-presale mint recipients (liquidity / team vesting / ops).
     event AllocationRecipientsUpdated(address liquidity, address team, address ops);
-    /// @notice BNB-path buy router (`recordBuyAndMintCashback` / `burn`); `address(0)` clears.
+    /// @notice USDC-path buy router (`recordBuyAndMintCashback` / `burn`); `address(0)` clears.
     event BuyRouterUpdated(address buyRouter);
 
     /// @notice Whitepaper §4.1: TCG-VAULT Token, TCGV, 1 milliard supply, BNB Chain.
@@ -550,7 +550,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     }
 
     /**
-     * @notice Set the buy router (fee in BNB path). Only this contract can call recordBuyAndMintCashback.
+     * @notice Set the buy router used for USDC-path buy/sell flow. Only this address can call `recordBuyAndMintCashback`.
      */
     function setBuyRouter(address _buyRouter) external onlyRole(ADMIN_ROLE) {
         address previous = buyRouter;
@@ -567,7 +567,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     }
 
     /**
-     * @notice Called by buy router after swapping BNB → TCGV: mints NEXUS cashback to recipient (30% presale, 10% standard). Only callable by buyRouter.
+     * @notice Called by buy router after swapping USDC -> TCGV: mints NEXUS cashback to recipient (30% presale, 10% standard). Only callable by `buyRouter`.
      */
     function recordBuyAndMintCashback(address recipient, uint256 tcgvAmount) external {
         if (msg.sender != buyRouter) revert OnlyBuyRouter();

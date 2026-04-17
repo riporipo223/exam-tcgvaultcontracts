@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.27;
 
-/// @notice Used in tests to simulate vault/marketing rejecting BNB
+/// @notice Used in tests to simulate recipients rejecting native BNB/ETH.
 contract RejectETH {
     receive() external payable {
         revert("REJECT_ETH");
     }
 }
 
-/// @notice Seller that rejects BNB to trigger UserTransferFailed in BuyRouter tests
+/// @notice Legacy helper for router-path sell tests.
 interface ITCGVaultBuyRouter {
-    function sellTCGVForBNB(uint256 amountIn, uint256 amountOutMin, uint256 deadline) external;
+    function sellTCGVForUSDC(uint256 amountIn, uint256 amountOutMin, uint256 deadline) external;
 }
 
 interface IERC20 {
@@ -22,9 +22,9 @@ contract SellerRejectETH {
         revert("REJECT_ETH");
     }
 
-    /// @notice Approve router then sell; when called from EOA, msg.sender in approve is this contract so router can pull from this contract
-    function sellTCGVForBNB(address tcgv, address router, uint256 amountIn, uint256 amountOutMin, uint256 deadline) external {
+    /// @notice Approve router then sell; when called from EOA, msg.sender in approve is this contract so router can pull from this contract.
+    function sellTCGVForUSDC(address tcgv, address router, uint256 amountIn, uint256 amountOutMin, uint256 deadline) external {
         IERC20(tcgv).approve(router, amountIn);
-        ITCGVaultBuyRouter(router).sellTCGVForBNB(amountIn, amountOutMin, deadline);
+        ITCGVaultBuyRouter(router).sellTCGVForUSDC(amountIn, amountOutMin, deadline);
     }
 }
