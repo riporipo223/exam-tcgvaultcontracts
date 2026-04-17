@@ -14,6 +14,7 @@ import {ITCGVaultStakingVault} from "./interfaces/ITCGVaultStakingVault.sol";
 contract TCGVaultBasicNFT is ERC721, Ownable2Step {
     ITCGVaultStakingVault private _stakingVault;
     uint256 private _nextTokenId;
+    uint256 private _burnCount;
     /// @notice Base URI for tokenURI (set by owner; used by explorers/marketplaces).
     string private _baseTokenURI;
 
@@ -58,8 +59,16 @@ contract TCGVaultBasicNFT is ERC721, Ownable2Step {
         emit StakingVaultUpdated(stakingVault_);
     }
 
-    /// @notice Total number of Basic NFTs ever minted (sold). Used by Initial Launch for tracking.
+    /// @notice Total number of currently existing Basic NFTs (minted - burned).
     function totalSupply() external view returns (uint256) {
+        unchecked {
+            // _burnCount can only grow when a token is burned, so it never exceeds _nextTokenId.
+            return _nextTokenId - _burnCount;
+        }
+    }
+
+    /// @notice Total number of Basic NFTs ever minted.
+    function totalMinted() external view returns (uint256) {
         return _nextTokenId;
     }
 
@@ -89,6 +98,7 @@ contract TCGVaultBasicNFT is ERC721, Ownable2Step {
             if (_ownerOf(tokenId) == owner) {
                 _ownerToTokenId[owner] = 0;
                 _burn(tokenId);
+                _burnCount += 1;
             }
         }
     }

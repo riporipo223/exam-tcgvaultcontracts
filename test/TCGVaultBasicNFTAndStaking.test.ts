@@ -117,11 +117,13 @@ describe("TCGVaultBasicNFT + StakingVault", () => {
     it("deposit with enough stake auto-mints Basic NFT", async () => {
       await tcgv.write.transfer([user2.account.address, parseEther("200")], { account: owner.account });
       await tcgv.write.approve([stakingVault.address, parseEther("200")], { account: user2.account });
-      const nextBefore = await basicNFT.read.nextTokenId();
+      const totalSupplyBefore = await basicNFT.read.totalSupply();
+      const totalMintedBefore = await basicNFT.read.totalMinted();
       await stakingVault.write.deposit([parseEther("200"), user2.account.address], { account: user2.account });
       const tokenId = (await basicNFT.read.nextTokenId()) - 1n;
       expect(getAddress((await basicNFT.read.ownerOf([tokenId])) as `0x${string}`)).to.equal(getAddress(user2.account.address));
-      expect(await basicNFT.read.totalSupply()).to.equal(nextBefore + 1n);
+      expect(await basicNFT.read.totalSupply()).to.equal(totalSupplyBefore + 1n);
+      expect(await basicNFT.read.totalMinted()).to.equal(totalMintedBefore + 1n);
       expect(await basicNFT.read.ownerToTokenId([user2.account.address])).to.equal(tokenId + 1n); // 1-based
     });
 
@@ -187,12 +189,16 @@ describe("TCGVaultBasicNFT + StakingVault", () => {
       const shares = (await stakingVault.read.balanceOf([user2.account.address]));
       expect(shares >= MIN_STAKE).to.equal(true);
       const tokenId = (await basicNFT.read.nextTokenId()) - 1n;
+      const totalSupplyBefore = await basicNFT.read.totalSupply();
+      const totalMintedBefore = await basicNFT.read.totalMinted();
       await stakingVault.write.redeem([shares, user2.account.address, user2.account.address], {
         account: user2.account,
       });
       expect(await stakingVault.read.balanceOf([user2.account.address])).to.equal(0n);
       await expectRevert(basicNFT.read.ownerOf([tokenId]));
       expect(await basicNFT.read.ownerToTokenId([user2.account.address])).to.equal(0n);
+      expect(await basicNFT.read.totalSupply()).to.equal(totalSupplyBefore - 1n);
+      expect(await basicNFT.read.totalMinted()).to.equal(totalMintedBefore);
     });
 
     it("owner can setStakingVault", async () => {
