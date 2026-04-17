@@ -301,7 +301,7 @@ describe("TCGVaultBuyRouter", function () {
     );
   });
 
-  it("buy with communityBp > 0 transfers community share", async function () {
+  it("buy with communityBp > 0 accrues community share and allows claim", async function () {
     const { owner, buyRouter, usdc, community } = await networkHelpers.loadFixture(deployFixture);
     await buyRouter.write.setBuyFeeParams([1000n, 300n, 100n], { account: owner.account });
     const usdcIn = parseUnits("500", 6);
@@ -309,11 +309,15 @@ describe("TCGVaultBuyRouter", function () {
     await usdc.write.approve([buyRouter.address, usdcIn], { account: owner.account });
     const communityBefore = await usdc.read.balanceOf([community.account.address]);
     await buyRouter.write.buyTCGVWithUSDC([usdcIn, 0n, BigInt(Math.floor(Date.now() / 1000) + 300)], { account: owner.account });
+    const pendingCommunity = await buyRouter.read.pendingUsdcFees([community.account.address]);
+    assert.ok(pendingCommunity > 0n);
+    await buyRouter.write.claimUsdcFees({ account: community.account });
     const communityAfter = await usdc.read.balanceOf([community.account.address]);
     assert.ok(communityAfter > communityBefore);
+    assert.strictEqual(await buyRouter.read.pendingUsdcFees([community.account.address]), 0n);
   });
 
-  it("sell with fee distributes to vault autolp marketing community", async function () {
+  it("sell with fee accrues shares and recipients can claim", async function () {
     const { owner, tcgv, buyRouter, usdc, vault, marketing, community } = await networkHelpers.loadFixture(deployFixture);
     const sellAmount = parseEther("100");
     const tcgvBal = await tcgv.read.balanceOf([owner.account.address]);
@@ -326,7 +330,29 @@ describe("TCGVaultBuyRouter", function () {
     const vAfter = await usdc.read.balanceOf([vault.account.address]);
     const mAfter = await usdc.read.balanceOf([marketing.account.address]);
     const cAfter = await usdc.read.balanceOf([community.account.address]);
-    assert.ok(vAfter >= vBefore && mAfter >= mBefore && cAfter >= cBefore);
+    assert.ok(vAfter === vBefore && mAfter === mBefore && cAfter === cBefore);
+
+    const pendingVault = await buyRouter.read.pendingUsdcFees([vault.account.address]);
+    const pendingMarketing = await buyRouter.read.pendingUsdcFees([marketing.account.address]);
+    const pendingCommunity = await buyRouter.read.pendingUsdcFees([community.account.address]);
+    assert.ok(pendingVault > 0n && pendingMarketing > 0n && pendingCommunity > 0n);
+
+    await buyRouter.write.claimUsdcFees({ account: vault.account });
+    await buyRouter.write.claimUsdcFees({ account: marketing.account });
+    await buyRouter.write.claimUsdcFees({ account: community.account });
+
+    assert.ok((await usdc.read.balanceOf([vault.account.address])) > vBefore);
+    assert.ok((await usdc.read.balanceOf([marketing.account.address])) > mBefore);
+    assert.ok((await usdc.read.balanceOf([community.account.address])) > cBefore);
+  });
+
+  it("claimUsdcFees reverts when caller has no accrued balance", async function () {
+    const { buyRouter, user1 } = await networkHelpers.loadFixture(deployFixture);
+    await viem.assertions.revertWithCustomError(
+      buyRouter.write.claimUsdcFees({ account: user1.account }),
+      buyRouter,
+      "NoFeesToClaim"
+    );
   });
 
   it("buy without setReferrer on TCGR does not mint TCGR", async function () {

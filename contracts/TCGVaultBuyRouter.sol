@@ -27,6 +27,8 @@ error InsufficientOutputAmount();
 error Expired();
 /// @notice Vault, marketing, and community must be non-zero (immutable).
 error ZeroAddress();
+/// @notice No claimable USDC fee balance for caller.
+error NoFeesToClaim();
 
 /**
  * @title TCGVaultBuyRouter
@@ -61,6 +63,7 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
     address private immutable _marketing;
     address private immutable _community;
     ITCGRToken private _referralToken;
+    mapping(address => uint256) private _pendingUsdcFees;
 
     event BuyWithUSDC(address buyer, uint256 usdcIn, uint256 feeUSDC, uint256 tcgvOut);
     event ReferralTokenSet(address token);
@@ -73,6 +76,7 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
         uint256 marketingShareBp,
         uint256 communityShareBp
     );
+    event UsdcFeesClaimed(address recipient, uint256 amount);
 
     error InvalidFeeParams();
 
@@ -95,6 +99,7 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
     function sellAutolpShareBp() external view returns (uint256) { return _sellAutolpShareBp; }
     function sellMarketingShareBp() external view returns (uint256) { return _sellMarketingShareBp; }
     function sellCommunityShareBp() external view returns (uint256) { return _sellCommunityShareBp; }
+    function pendingUsdcFees(address recipient) external view returns (uint256) { return _pendingUsdcFees[recipient]; }
 
     constructor(
         address router_,
@@ -259,9 +264,9 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
         feeUSDC = vaultUSDC + marketingUSDC + communityUSDC;
         uint256 swapAmount = usdcAmount - feeUSDC;
 
-        if (vaultUSDC > 0) _usdc.transfer(_vault, vaultUSDC);
-        if (marketingUSDC > 0) _usdc.transfer(_marketing, marketingUSDC);
-        if (communityUSDC > 0) _usdc.transfer(_community, communityUSDC);
+        if (vaultUSDC > 0) _pendingUsdcFees[_vault] += vaultUSDC;
+        if (marketingUSDC > 0) _pendingUsdcFees[_marketing] += marketingUSDC;
+        if (communityUSDC > 0) _pendingUsdcFees[_community] += communityUSDC;
 
         // Build path [USDC, TCGV]
         address[] memory path = new address[](2);
@@ -338,15 +343,26 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
             uint256 marketingUsdc = (feeUsdc * _sellMarketingShareBp) / 10000;
             uint256 communityUsdc = (feeUsdc * _sellCommunityShareBp) / 10000;
 
-            if (vaultUsdc > 0) _usdc.transfer(_vault, vaultUsdc);
-            if (autolpUsdc > 0) _usdc.transfer(_vault, autolpUsdc);
-            if (marketingUsdc > 0) _usdc.transfer(_marketing, marketingUsdc);
-            if (communityUsdc > 0) _usdc.transfer(_community, communityUsdc);
+            if (vaultUsdc > 0) _pendingUsdcFees[_vault] += vaultUsdc;
+            if (autolpUsdc > 0) _pendingUsdcFees[_vault] += autolpUsdc;
+            if (marketingUsdc > 0) _pendingUsdcFees[_marketing] += marketingUsdc;
+            if (communityUsdc > 0) _pendingUsdcFees[_community] += communityUsdc;
         }
 
         _usdc.transfer(msg.sender, userUsdc);
 
         emit SellTCGVForUSDC(msg.sender, amountIn, feeUsdc, userUsdc);
+    }
+
+    /**
+     * @notice Claim accrued USDC fees for caller.
+     */
+    function claimUsdcFees() external nonReentrant {
+        uint256 amount = _pendingUsdcFees[msg.sender];
+        if (amount == 0) revert NoFeesToClaim();
+        _pendingUsdcFees[msg.sender] = 0;
+        _usdc.transfer(msg.sender, amount);
+        emit UsdcFeesClaimed(msg.sender, amount);
     }
 
     // No need to receive native BNB/ETH; all flows are in ERC20 tokens (USDC, TCGV).

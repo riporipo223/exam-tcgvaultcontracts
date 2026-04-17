@@ -35,6 +35,8 @@ error Blacklisted();
 error ContractPaused();
 /// @notice Blacklist reason is required when enabling blacklist.
 error EmptyBlacklistReason();
+/// @notice No claimable fee balance for caller.
+error NoFeesToClaim();
 
 /**
  * @title TCGVaultToken (TCGV)
@@ -124,6 +126,8 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     mapping(address => bool) public isPair;
     /// @notice Accumulated buy/sell-fee autolp tokens; add to LP via executePendingAutolp() to avoid updating pair reserves during sell transfer (fixes router INSUFFICIENT_INPUT_AMOUNT).
     uint256 public pendingAutolp;
+    /// @notice Accrued buy/sell fee balances per recipient (pull-based claim).
+    mapping(address => uint256) public pendingFeeClaims;
     /// @notice Blacklist: when true, address cannot send nor receive TCGV (fraud, market manipulation, Sybil).
     mapping(address => bool) public isBlacklisted;
     /// @notice When true, all transfers (and thus buy/sell/mint via _update) are blocked for security emergency.
@@ -176,6 +180,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     event AllocationRecipientsUpdated(address liquidity, address team, address ops);
     /// @notice USDC-path buy router (`recordBuyAndMintCashback` / `burn`); `address(0)` clears.
     event BuyRouterUpdated(address buyRouter);
+    event FeeClaimed(address recipient, uint256 amount);
 
     error InvalidFeeParams();
 
@@ -517,6 +522,17 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         emit OpsVestingClaimed(opsRecipient, claimable);
     }
 
+    /**
+     * @notice Claim accrued buy/sell fee balance for caller.
+     */
+    function claimAccruedFees() external nonReentrant {
+        uint256 amount = pendingFeeClaims[msg.sender];
+        if (amount == 0) revert NoFeesToClaim();
+        pendingFeeClaims[msg.sender] = 0;
+        _update(address(this), msg.sender, amount);
+        emit FeeClaimed(msg.sender, amount);
+    }
+
     /// @dev Returns claimable team vesting amount (linear from cliff end to teamVestingEnd).
     function _teamVestingClaimable() private view returns (uint256) {
         if (teamVestingTotal == 0 || block.timestamp < teamVestingCliffEnd) return 0;
@@ -655,13 +671,12 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         uint256 vaultAmount = (totalFee * BUY_VAULT_SHARE) / 10000;
         uint256 marketingAmount = (totalFee * BUY_MARKETING_SHARE) / 10000;
         uint256 autolpAmount = (totalFee * BUY_AUTOLP_SHARE) / 10000;
+        uint256 feeToCollect = vaultAmount + marketingAmount + autolpAmount;
 
-        if (vaultAmount > 0) super._update(from, vaultAddress, vaultAmount);
-        if (marketingAmount > 0) super._update(from, marketingAddress, marketingAmount);
-        if (autolpAmount > 0) {
-            super._update(from, address(this), autolpAmount);
-            pendingAutolp += autolpAmount;
-        }
+        if (feeToCollect > 0) super._update(from, address(this), feeToCollect);
+        if (vaultAmount > 0) pendingFeeClaims[vaultAddress] += vaultAmount;
+        if (marketingAmount > 0) pendingFeeClaims[marketingAddress] += marketingAmount;
+        if (autolpAmount > 0) pendingAutolp += autolpAmount;
         emit FeesDistributed(vaultAmount, marketingAmount, 0, 0, autolpAmount);
     }
 
@@ -673,14 +688,13 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         uint256 autolpAmount = (totalFee * SELL_AUTOLP_SHARE) / 10000;
         uint256 marketingAmount = (totalFee * SELL_MARKETING_SHARE) / 10000;
         uint256 communityAmount = (totalFee * SELL_COMMUNITY_SHARE) / 10000;
+        uint256 feeToCollect = vaultAmount + autolpAmount + marketingAmount + communityAmount;
 
-        if (vaultAmount > 0) super._update(from, vaultAddress, vaultAmount);
-        if (autolpAmount > 0) {
-            super._update(from, address(this), autolpAmount);
-            pendingAutolp += autolpAmount;
-        }
-        if (marketingAmount > 0) super._update(from, marketingAddress, marketingAmount);
-        if (communityAmount > 0) super._update(from, communityAddress, communityAmount);
+        if (feeToCollect > 0) super._update(from, address(this), feeToCollect);
+        if (vaultAmount > 0) pendingFeeClaims[vaultAddress] += vaultAmount;
+        if (autolpAmount > 0) pendingAutolp += autolpAmount;
+        if (marketingAmount > 0) pendingFeeClaims[marketingAddress] += marketingAmount;
+        if (communityAmount > 0) pendingFeeClaims[communityAddress] += communityAmount;
         emit FeesDistributed(vaultAmount, marketingAmount, communityAmount, 0, autolpAmount);
     }
 
