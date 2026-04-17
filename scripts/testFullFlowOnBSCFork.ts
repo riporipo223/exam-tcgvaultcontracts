@@ -710,7 +710,7 @@ async function main() {
         if (convertAmount > 0n) {
           const deployerTcgvBefore = await token.read.balanceOf([deployer.account.address]);
           await tcgr.write.approve([converterAddress, convertAmount], { account: deployer.account });
-          await converter.write.convert([convertAmount], { account: deployer.account });
+          await converter.write.convert([convertAmount, convertAmount], { account: deployer.account });
           const deployerTcgvAfter = await token.read.balanceOf([deployer.account.address]);
           const tcgvOut = deployerTcgvAfter - deployerTcgvBefore;
           console.log("Convert TCGR→TCGV: burned", formatEther(convertAmount), "TCGR → received", formatEther(tcgvOut), "TCGV (1:1)");

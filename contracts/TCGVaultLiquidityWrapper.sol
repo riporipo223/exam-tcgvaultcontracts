@@ -2,6 +2,7 @@
 pragma solidity 0.8.27;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {IRouter} from "./interfaces/IRouter.sol";
@@ -20,6 +21,8 @@ error FeeOnTransferTokenNotSupported(address token, uint256 expected, uint256 re
  *      so the pair→EOA transfer (otherwise taxed as a “buy”) never happens on-chain.
  */
 contract TCGVaultLiquidityWrapper is Ownable2Step {
+    using SafeERC20 for IERC20;
+
     /// @notice The TCGV token this wrapper pulls and forwards.
     address public immutable tcgvToken;
     /// @notice Routers that may be used for add/remove liquidity.
@@ -59,7 +62,7 @@ contract TCGVaultLiquidityWrapper is Ownable2Step {
         uint256 deadline
     ) external returns (uint256 amountA, uint256 amountB, uint256 liquidity) {
         if (!_allowedRouters[router]) revert RouterNotAllowed();
-        _pullExact(tcgvToken, msg.sender, amountADesired);
+        _pullExactTcgv(msg.sender, amountADesired);
         _pullExact(tokenB, msg.sender, amountBDesired);
         IERC20(tcgvToken).approve(router, amountADesired);
         IERC20(tokenB).approve(router, amountBDesired);
@@ -79,7 +82,7 @@ contract TCGVaultLiquidityWrapper is Ownable2Step {
             IERC20(tcgvToken).transfer(msg.sender, amountADesired - amountA);
         }
         if (amountB < amountBDesired) {
-            IERC20(tokenB).transfer(msg.sender, amountBDesired - amountB);
+            IERC20(tokenB).safeTransfer(msg.sender, amountBDesired - amountB);
         }
     }
 
@@ -94,7 +97,7 @@ contract TCGVaultLiquidityWrapper is Ownable2Step {
         uint256 deadline
     ) external returns (uint256 amountA, uint256 amountB) {
         if (!_allowedRouters[router]) revert RouterNotAllowed();
-        IERC20(lpToken).transferFrom(msg.sender, address(this), liquidity);
+        IERC20(lpToken).safeTransferFrom(msg.sender, address(this), liquidity);
         IERC20(lpToken).approve(router, liquidity);
         uint256 tcgvBefore = IERC20(tcgvToken).balanceOf(address(this));
         uint256 tokenBBefore = IERC20(tokenB).balanceOf(address(this));
@@ -115,14 +118,23 @@ contract TCGVaultLiquidityWrapper is Ownable2Step {
             IERC20(tcgvToken).transfer(msg.sender, tcgvOut);
         }
         if (tokenBOut > 0) {
-            IERC20(tokenB).transfer(msg.sender, tokenBOut);
+            IERC20(tokenB).safeTransfer(msg.sender, tokenBOut);
         }
         return (tcgvOut, tokenBOut);
     }
 
+    function _pullExactTcgv(address from, uint256 expectedAmount) private {
+        uint256 balanceBefore = IERC20(tcgvToken).balanceOf(address(this));
+        IERC20(tcgvToken).transferFrom(from, address(this), expectedAmount);
+        uint256 receivedAmount = IERC20(tcgvToken).balanceOf(address(this)) - balanceBefore;
+        if (receivedAmount != expectedAmount) {
+            revert FeeOnTransferTokenNotSupported(tcgvToken, expectedAmount, receivedAmount);
+        }
+    }
+
     function _pullExact(address token, address from, uint256 expectedAmount) private {
         uint256 balanceBefore = IERC20(token).balanceOf(address(this));
-        IERC20(token).transferFrom(from, address(this), expectedAmount);
+        IERC20(token).safeTransferFrom(from, address(this), expectedAmount);
         uint256 receivedAmount = IERC20(token).balanceOf(address(this)) - balanceBefore;
         if (receivedAmount != expectedAmount) {
             revert FeeOnTransferTokenNotSupported(token, expectedAmount, receivedAmount);

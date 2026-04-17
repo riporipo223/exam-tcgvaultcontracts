@@ -8,14 +8,14 @@
  * Order:
  * 1. TCGVaultStakingVault(TCGV)
  * 2. TCGVaultBasicNFT(stakingVault)
- * 3. setMinStakeForBasicNFT, setBasicNFTContract on vault
+ * 3. setRequiredStakeForBasicNFT, setBasicNFTContract on vault
  * 4. TCGVaultFounderNFT(usdc, nexusToken, caspUsdcRecipient) — env: CASP_USDC_ADDRESS (fallback: TREASURY_ADDRESS or deployer)
  * 5. TCGVaultInitialLaunch(tcgv, usdc, founderNFT, nexusToken, treasury) — env: TREASURY_ADDRESS (fallback: CASP_USDC_ADDRESS or deployer)
  * 6. NEXUS must have been deployed with immutable presale bonus minters = FounderNFT + InitialLaunch (constructor); no setter.
  * 7. Transfer 600M TCGV (60% of supply) to InitialLaunch for presale vesting claims
  *
  * Usage:
- *   TCGV_ADDRESS=... USDC_ADDRESS=... NEXUS_ADDRESS=... yarn hardhat run scripts/deployTCGVaultNFTAndLaunch.ts --network <network>
+ *   TCGV_ADDRESS=... USDC_ADDRESS=... NEXUS_ADDRESS=... [BUY_ROUTER_ADDRESS=...] yarn hardhat run scripts/deployTCGVaultNFTAndLaunch.ts --network <network>
  */
 
 import hre from "hardhat";
@@ -27,6 +27,7 @@ async function main() {
   const tcgvAddress = (process.env.TCGV_ADDRESS || process.env.TOKEN_ADDRESS) as `0x${string}`;
   const usdcAddress = (process.env.USDC_ADDRESS || process.env.STABLECOIN_ADDRESS) as `0x${string}`;
   const nexusAddress = process.env.NEXUS_ADDRESS as `0x${string}`;
+  const buyRouterAddress = process.env.BUY_ROUTER_ADDRESS as `0x${string}` | undefined;
   const caspUsdcRecipient = (process.env.CASP_USDC_ADDRESS || deployer.account.address) as `0x${string}`;
   const treasury = (process.env.TREASURY_ADDRESS || caspUsdcRecipient) as `0x${string}`;
 
@@ -48,9 +49,15 @@ async function main() {
   console.log("TCGVaultBasicNFT:", basicNFT.address);
 
   const minShares = parseEther("5000");
-  await vault.write.setMinStakeForBasicNFT([minShares], { account: deployer.account });
+  await vault.write.setRequiredStakeForBasicNFT([minShares], { account: deployer.account });
   await vault.write.setBasicNFTContract([basicNFT.address], { account: deployer.account });
+  if (buyRouterAddress) {
+    await vault.write.setBasicNFTPricingRouter([buyRouterAddress], { account: deployer.account });
+  }
   console.log("Min stake for Basic NFT set (5000 TCGV)");
+  if (buyRouterAddress) {
+    console.log("Dynamic Basic NFT threshold enabled from buy router pool (~25 USDC worth of TCGV)");
+  }
   console.log("Note: TCGV staking vault is now configured via the TCGVaultToken constructor (no on-chain setter).");
 
   const founderNFT = await viem.deployContract(

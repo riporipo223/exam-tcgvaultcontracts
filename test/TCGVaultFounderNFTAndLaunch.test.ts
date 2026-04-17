@@ -77,6 +77,7 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
 
   const WAVE1_PRICE = 200 * 1e6;
   const WAVE2_PRICE = 350 * 1e6;
+  const FINALIZE_DELAY_SECONDS = 20 * 24 * 3600;
 
   async function sellOutWave1Founder() {
     const wave1Cap = 250;
@@ -104,6 +105,23 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
         await founderNFT.write.mint({ account: owner.account });
       }
     }
+  }
+
+  async function advanceToTimestamp(target: bigint) {
+    const now = BigInt(await networkHelpers.time.latest());
+    if (target <= now) return;
+    await networkHelpers.time.increase(Number(target - now));
+    await networkHelpers.mine();
+  }
+
+  async function advanceToFounderWave2(founder: { read: { wave2StartTimestamp: () => Promise<bigint> } }) {
+    const wave2Start = await founder.read.wave2StartTimestamp();
+    await advanceToTimestamp(wave2Start);
+  }
+
+  async function advancePastPresaleEnd(launch: { read: { presaleEndTime: () => Promise<bigint> } }) {
+    const presaleEnd = await launch.read.presaleEndTime();
+    await advanceToTimestamp(presaleEnd + 1n);
   }
 
   before(async () => {
@@ -176,16 +194,63 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       expect((await usdc.read.balanceOf([owner.account.address])) - bCaspBefore).to.equal(price);
     });
 
+    it("first founder mint anchors wave2StartTimestamp to mint time + 7 days", async () => {
+      const { founder: freshFounder } = await deployIsolatedPresaleStack(owner, usdc.address as `0x${string}`);
+      expect(await freshFounder.read.wave2StartTimestamp()).to.equal(0n);
+      await usdc.write.approve([freshFounder.address, BigInt(WAVE1_PRICE)], { account: user1.account });
+      const beforeMint = BigInt(await networkHelpers.time.latest());
+      await freshFounder.write.mint({ account: user1.account });
+      const afterMint = BigInt(await networkHelpers.time.latest());
+      const wave2Start = await freshFounder.read.wave2StartTimestamp();
+      expect(wave2Start >= beforeMint + 7n * 24n * 3600n).to.equal(true);
+      expect(wave2Start <= afterMint + 7n * 24n * 3600n).to.equal(true);
+    });
+
     it(
-      "after 250 mints wave2StartTimestamp is set and wave 2 price is 350 USDC",
+      "wave 2 starts when wave 1 sells out before timer ends",
       { timeout: 120000 },
       async () => {
       await sellOutWave1Founder();
       expect(await founderNFT.read.soldCount()).to.equal(250n);
         const wave2Start = (await founderNFT.read.wave2StartTimestamp());
-        expect(wave2Start > 0n).to.equal(true);
+        const latest = BigInt(await networkHelpers.time.latest());
+        expect(wave2Start <= latest).to.equal(true);
       expect(await founderNFT.read.currentPrice()).to.equal(BigInt(WAVE2_PRICE));
       expect(await founderNFT.read.currentWave()).to.equal(2n);
+      }
+    );
+
+    it(
+      "once wave 2 starts, cancellation does not revert price/countdown but still updates live sold count",
+      { timeout: 120000 },
+      async () => {
+        const { founder: freshFounder } = await deployIsolatedPresaleStack(owner, usdc.address as `0x${string}`);
+
+        await usdc.write.approve([freshFounder.address, BigInt(245 * WAVE1_PRICE)], { account: user1.account });
+        for (let i = 0; i < 245; i++) await freshFounder.write.mint({ account: user1.account });
+
+        await usdc.write.approve([freshFounder.address, BigInt(5 * WAVE1_PRICE)], { account: owner.account });
+        for (let i = 0; i < 5; i++) await freshFounder.write.mint({ account: owner.account });
+
+        expect(await freshFounder.read.soldCount()).to.equal(250n);
+        expect(await freshFounder.read.currentPrice()).to.equal(BigInt(WAVE2_PRICE));
+        const wave2Before = await freshFounder.read.wave2StartTimestamp();
+        expect(wave2Before > 0n).to.equal(true);
+        expect(await freshFounder.read.ownerWave1Mints()).to.equal(5n);
+
+        await freshFounder.write.cancelFounderPurchase([249n], { account: owner.account });
+
+        expect(await freshFounder.read.soldCount()).to.equal(249n);
+        expect(await freshFounder.read.currentWave()).to.equal(2n);
+        expect(await freshFounder.read.currentPrice()).to.equal(BigInt(WAVE2_PRICE));
+        expect(await freshFounder.read.wave2StartTimestamp()).to.equal(wave2Before);
+        expect(await freshFounder.read.ownerWave1Mints()).to.equal(4n);
+
+        await usdc.write.approve([freshFounder.address, BigInt(WAVE2_PRICE)], { account: owner.account });
+        await freshFounder.write.mint({ account: owner.account });
+        expect(await freshFounder.read.soldCount()).to.equal(250n);
+        expect(await freshFounder.read.currentPrice()).to.equal(BigInt(WAVE2_PRICE));
+        expect(await freshFounder.read.wave2StartTimestamp()).to.equal(wave2Before);
       }
     );
 
@@ -329,8 +394,9 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
     });
 
     it("wave 2: price 0.008 USDC/TCGV, 4% cap per wallet, 30% NEXUS on buy", async () => {
-      // Ensure Founder wave 1 is fully sold so InitialLaunch uses wave 2 price
-      await sellOutWave1Founder();
+      await usdc.write.approve([founderNFT.address, BigInt(WAVE2_PRICE)], { account: user1.account });
+      await founderNFT.write.mint({ account: user1.account });
+      await advanceToFounderWave2(founderNFT);
       // Use 8 USDC so 10% TGE fits in contract's 1000 TCGV for finalize/claim test
       const usdcAmount = 8 * 1e6;
       await usdc.write.approve([initialLaunch.address, BigInt(usdcAmount)], { account: user1.account });
@@ -344,11 +410,31 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       expect(u[0]).to.equal((BigInt(usdcAmount) * (10n ** 18n)) / 8000n);
     });
 
-    it("non-owner cannot finalize before 120h countdown or hard cap", async (t) => {
-      const endTime = await initialLaunch.read.presaleEndTime();
-      if (endTime === BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")) {
-        return t.skip();
-      }
+    it("InitialLaunch stays on wave 2 pricing after founder cancellation below 250", async () => {
+      const { founder: freshFounder, launch: freshLaunch } = await deployIsolatedPresaleStack(
+        owner,
+        usdc.address as `0x${string}`,
+      );
+
+      await usdc.write.approve([freshFounder.address, BigInt(245 * WAVE1_PRICE)], { account: user1.account });
+      for (let i = 0; i < 245; i++) await freshFounder.write.mint({ account: user1.account });
+
+      await usdc.write.approve([freshFounder.address, BigInt(5 * WAVE1_PRICE)], { account: owner.account });
+      for (let i = 0; i < 5; i++) await freshFounder.write.mint({ account: owner.account });
+
+      expect(await freshFounder.read.soldCount()).to.equal(250n);
+      expect(await freshLaunch.read.currentPrice()).to.equal(8000n);
+      const presaleEndBefore = await freshLaunch.read.presaleEndTime();
+      expect(presaleEndBefore).to.not.equal(BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
+
+      await freshFounder.write.cancelFounderPurchase([249n], { account: owner.account });
+
+      expect(await freshFounder.read.soldCount()).to.equal(249n);
+      expect(await freshLaunch.read.currentPrice()).to.equal(8000n);
+      expect(await freshLaunch.read.presaleEndTime()).to.equal(presaleEndBefore);
+    });
+
+    it("non-owner cannot finalize before countdown end + delay", async (t) => {
       if (await initialLaunch.read.tgeTimestamp() !== 0n) {
         return t.skip();
       }
@@ -356,14 +442,7 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
     });
 
     it("buy reverts after 120h countdown", async (t) => {
-      // Ensure wave2StartTimestamp is set (250 Founder NFTs sold)
-      await sellOutWave1Founder();
-      const endTime = await initialLaunch.read.presaleEndTime();
-      if (endTime === BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")) {
-        return t.skip();
-      }
-      await networkHelpers.time.increase(121 * 3600);
-      await networkHelpers.mine();
+      await advancePastPresaleEnd(initialLaunch);
       await usdc.write.approve([initialLaunch.address, BigInt(1000 * 1e6)], { account: user1.account });
       await expectRevert(initialLaunch.write.buy([BigInt(1000 * 1e6)], { account: user1.account }));
     });
@@ -379,7 +458,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       for (let i = 0; i < 5; i++) await freshFounder.write.mint({ account: owner.account });
       await usdc.write.approve([freshLaunch.address, BigInt(8 * 1e6)], { account: user1.account });
       await freshLaunch.write.buy([BigInt(8 * 1e6)], { account: user1.account });
-      await networkHelpers.time.increase(121 * 3600 + 20 * 24 * 3600);
+      await advancePastPresaleEnd(freshLaunch);
+      await networkHelpers.time.increase(FINALIZE_DELAY_SECONDS + 1);
       await networkHelpers.mine();
       await freshLaunch.write.finalize({ account: owner.account });
       await usdc.write.approve([freshLaunch.address, BigInt(1000 * 1e6)], { account: user1.account });
@@ -391,9 +471,19 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
     });
 
     it("finalize and claim vesting 10% TGE", async () => {
-      // Ensure countdown has ended: sell 250 Founder NFTs and advance time
-      await sellOutWave1Founder();
-      await networkHelpers.time.increase(121 * 3600 + 20 * 24 * 3600);
+      if ((await founderNFT.read.wave2StartTimestamp()) === 0n) {
+        await usdc.write.approve([founderNFT.address, BigInt(WAVE2_PRICE)], { account: user1.account });
+        await founderNFT.write.mint({ account: user1.account });
+      }
+      await advanceToFounderWave2(founderNFT);
+      const [existingAllocation] = await initialLaunch.read.allocations([user1.account.address]);
+      if (existingAllocation === 0n) {
+        const usdcAmount = 8 * 1e6;
+        await usdc.write.approve([initialLaunch.address, BigInt(usdcAmount)], { account: user1.account });
+        await initialLaunch.write.buy([BigInt(usdcAmount)], { account: user1.account });
+      }
+      await advancePastPresaleEnd(initialLaunch);
+      await networkHelpers.time.increase(FINALIZE_DELAY_SECONDS + 1);
       await networkHelpers.mine();
       await initialLaunch.write.finalize({ account: owner.account });
       const releasable = (await initialLaunch.read.releasable([user1.account.address]));
@@ -426,10 +516,7 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       );
     });
 
-    it("finalize reverts PresaleNotEnded when called before 120h countdown", async () => {
-      await sellOutWave1Founder();
-      const endTime = await initialLaunch.read.presaleEndTime();
-      if (endTime === BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")) return;
+    it("finalize reverts PresaleNotEnded when called before countdown+delay", async () => {
       await expectRevert(initialLaunch.write.finalize({ account: owner.account }));
     });
 
@@ -466,7 +553,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const usdcAmount = 8 * 1e6;
       await usdc.write.approve([freshLaunch.address, BigInt(usdcAmount)], { account: user1.account });
       await freshLaunch.write.buy([BigInt(usdcAmount)], { account: user1.account });
-      await networkHelpers.time.increase(121 * 3600 + 20 * 24 * 3600);
+      await advancePastPresaleEnd(freshLaunch);
+      await networkHelpers.time.increase(FINALIZE_DELAY_SECONDS + 1);
       await networkHelpers.mine();
       await freshLaunch.write.finalize({ account: owner.account });
       const allocation = (await freshLaunch.read.allocations([user1.account.address])) as readonly [bigint, bigint];
@@ -490,7 +578,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const usdcAmount = 8 * 1e6;
       await usdc.write.approve([freshLaunch.address, BigInt(usdcAmount)], { account: user1.account });
       await freshLaunch.write.buy([BigInt(usdcAmount)], { account: user1.account });
-      await networkHelpers.time.increase(121 * 3600 + 20 * 24 * 3600);
+      await advancePastPresaleEnd(freshLaunch);
+      await networkHelpers.time.increase(FINALIZE_DELAY_SECONDS + 1);
       await networkHelpers.mine();
       await freshLaunch.write.finalize({ account: owner.account });
       const allocation = (await freshLaunch.read.allocations([user1.account.address])) as readonly [bigint, bigint];
@@ -515,7 +604,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const usdcAmount = 8 * 1e6;
       await usdc.write.approve([freshLaunch.address, BigInt(usdcAmount)], { account: user1.account });
       await freshLaunch.write.buy([BigInt(usdcAmount)], { account: user1.account });
-      await networkHelpers.time.increase(121 * 3600 + 20 * 24 * 3600);
+      await advancePastPresaleEnd(freshLaunch);
+      await networkHelpers.time.increase(FINALIZE_DELAY_SECONDS + 1);
       await networkHelpers.mine();
       await freshLaunch.write.finalize({ account: owner.account });
       const allocation = (await freshLaunch.read.allocations([user1.account.address])) as readonly [bigint, bigint];
@@ -543,7 +633,8 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       const usdcAmount = 8 * 1e6;
       await usdc.write.approve([freshLaunch.address, BigInt(usdcAmount)], { account: user1.account });
       await freshLaunch.write.buy([BigInt(usdcAmount)], { account: user1.account });
-      await networkHelpers.time.increase(121 * 3600 + 20 * 24 * 3600);
+      await advancePastPresaleEnd(freshLaunch);
+      await networkHelpers.time.increase(FINALIZE_DELAY_SECONDS + 1);
       await networkHelpers.mine();
       await freshLaunch.write.finalize({ account: owner.account });
       const releasableBefore = await freshLaunch.read.releasable([user1.account.address]);
@@ -551,7 +642,7 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
       expect(await freshLaunch.read.releasable([user1.account.address])).to.equal(0n);
     });
 
-    it("presaleEndTime returns max when wave2 not started", async () => {
+    it("presaleEndTime returns max before first founder mint", async () => {
       const freshFounder = await viem.deployContract("TCGVaultFounderNFT", [
         usdc.address,
         nexus.address,
@@ -564,8 +655,44 @@ describe("TCGVaultFounderNFT + InitialLaunch (whitepaper)", () => {
         nexus.address,
         owner.account.address,
       ], { client: { wallet: owner } });
+      const wave2Start = await freshFounder.read.wave2StartTimestamp();
+      expect(wave2Start).to.equal(0n);
+      const countdownStart = await launchNoWave2.read.presaleCountdownStartTime();
       const end = await launchNoWave2.read.presaleEndTime();
+      expect(countdownStart).to.equal(BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
       expect(end).to.equal(BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
+    });
+
+    it("emergencyFinalize reverts before max presale duration", async () => {
+      const { launch: freshLaunch } = await deployIsolatedPresaleStack(owner, usdc.address as `0x${string}`);
+      await viem.assertions.revertWithCustomError(
+        freshLaunch.write.emergencyFinalize({ account: owner.account }),
+        freshLaunch,
+        "EmergencyFinalizeNotAvailable",
+      );
+    });
+
+    it("emergencyFinalize reverts when caller is not owner", async () => {
+      const { launch: freshLaunch } = await deployIsolatedPresaleStack(owner, usdc.address as `0x${string}`);
+      const maxPresaleDuration = await freshLaunch.read.MAX_PRESALE_DURATION();
+      await networkHelpers.time.increase(Number(maxPresaleDuration) + 1);
+      await networkHelpers.mine();
+      await expectRevert(freshLaunch.write.emergencyFinalize({ account: user1.account }));
+    });
+
+    it("owner can emergencyFinalize after max duration", async () => {
+      const { launch: freshLaunch } = await deployIsolatedPresaleStack(owner, usdc.address as `0x${string}`);
+      const maxPresaleDuration = await freshLaunch.read.MAX_PRESALE_DURATION();
+      await networkHelpers.time.increase(Number(maxPresaleDuration) + 1);
+      await networkHelpers.mine();
+      await freshLaunch.write.emergencyFinalize({ account: owner.account });
+      const tge = await freshLaunch.read.tgeTimestamp();
+      expect(tge > 0n).to.equal(true);
+      await viem.assertions.revertWithCustomError(
+        freshLaunch.write.finalize({ account: owner.account }),
+        freshLaunch,
+        "AlreadyFinalized",
+      );
     });
 
     it("releasable returns 0 for user with no allocation", async () => {

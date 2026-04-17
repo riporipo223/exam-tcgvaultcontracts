@@ -259,7 +259,7 @@ describe("TCGRToken", function () {
     await mockTcgv.write.transfer([converterContract.address, parseEther("100")], { account: owner.account });
     await tcgr.write.approve([converterContract.address, parseEther("100")], { account: referrer.account });
     await viem.assertions.revertWithCustomError(
-      converterContract.write.convert([0n], { account: referrer.account }),
+      converterContract.write.convert([0n, 0n], { account: referrer.account }),
       converterContract,
       "ZeroAmount"
     );
@@ -281,7 +281,7 @@ describe("TCGRToken", function () {
     await mockTcgv.write.transfer([converterContract.address, parseEther("100")], { account: owner.account });
     await tcgr.write.approve([converterContract.address, parseEther("100")], { account: referrer.account });
     await viem.assertions.revertWithCustomError(
-      converterContract.write.convert([parseEther("100")], { account: referrer.account }),
+      converterContract.write.convert([parseEther("100"), parseEther("100")], { account: referrer.account }),
       tcgr,
       "InsufficientBalance"
     );
@@ -302,7 +302,7 @@ describe("TCGRToken", function () {
     await mockTcgv.write.transfer([converterContract.address, parseEther("1000")], { account: owner.account });
     await tcgr.write.approve([converterContract.address, parseEther("10")], { account: referrer.account });
     await viem.assertions.revertWithCustomError(
-      converterContract.write.convert([parseEther("50")], { account: referrer.account }),
+      converterContract.write.convert([parseEther("50"), parseEther("50")], { account: referrer.account }),
       tcgr,
       "ERC20InsufficientAllowance"
     );
@@ -324,7 +324,7 @@ describe("TCGRToken", function () {
     await mockTcgv.write.transfer([converterContract.address, parseEther("100")], { account: owner.account });
     await tcgr.write.approve([converterContract.address, parseEther("1")], { account: referrer.account });
     await viem.assertions.revertWithCustomError(
-      converterContract.write.convert([parseEther("1")], { account: referrer.account }),
+      converterContract.write.convert([parseEther("1"), parseEther("1")], { account: referrer.account }),
       tcgr,
       "InsufficientUnlockedBalance"
     );
@@ -348,7 +348,7 @@ describe("TCGRToken", function () {
     await tcgr.write.setConverter([converterContract.address], { account: owner.account });
     await mockTcgv.write.transfer([converterContract.address, parseEther("100")], { account: owner.account });
     await tcgr.write.approve([converterContract.address, amount], { account: referrer.account });
-    await converterContract.write.convert([amount], { account: referrer.account });
+    await converterContract.write.convert([amount, amount], { account: referrer.account });
 
     assert.strictEqual(await tcgr.read.balanceOf([referrer.account.address]), 0n);
   });

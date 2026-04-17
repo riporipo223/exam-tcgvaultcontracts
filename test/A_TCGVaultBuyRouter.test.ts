@@ -262,31 +262,31 @@ describe("TCGVaultBuyRouter", function () {
     assert.ok((await buyRouter.read.sellMarketingShareBp()) >= 0n);
     assert.ok((await buyRouter.read.sellCommunityShareBp()) >= 0n);
   });
-  it("owner can setBuyFeeParams setSellFeeParams setReferralToken", async function () {
+  it("owner can only lower buy/sell tax rates and set referral token", async function () {
     const { buyRouter, owner } = await networkHelpers.loadFixture(deployFixture);
     const tcgr = await viem.deployContract("TCGRToken", [buyRouter.address], { client: { wallet: owner } });
     await buyRouter.write.setReferralToken([tcgr.address], { account: owner.account });
     assert.strictEqual((await buyRouter.read.referralToken()).toLowerCase(), tcgr.address.toLowerCase());
-    await buyRouter.write.setBuyFeeParams([1000n, 300n, 0n], { account: owner.account });
-    assert.strictEqual(await buyRouter.read.buyVaultBp(), 1000n);
-    assert.strictEqual(await buyRouter.read.buyMarketingBp(), 300n);
-    await buyRouter.write.setSellFeeParams([1000n, 2500n, 2500n, 2500n, 2500n], { account: owner.account });
-    assert.strictEqual(await buyRouter.read.sellTaxBp(), 1000n);
+    await buyRouter.write.setBuyFeeParams([200n, 100n, 0n], { account: owner.account });
+    assert.strictEqual(await buyRouter.read.buyVaultBp(), 200n);
+    assert.strictEqual(await buyRouter.read.buyMarketingBp(), 100n);
+    await buyRouter.write.setSellFeeParams([300n, 2500n, 2500n, 2500n, 2500n], { account: owner.account });
+    assert.strictEqual(await buyRouter.read.sellTaxBp(), 300n);
   });
 
-  it("setBuyFeeParams reverts when vaultBp + marketingBp + communityBp > 25%", async function () {
+  it("setBuyFeeParams reverts when any buy fee leg increases", async function () {
     const { buyRouter, owner } = await networkHelpers.loadFixture(deployFixture);
     await viem.assertions.revertWithCustomError(
-      buyRouter.write.setBuyFeeParams([2000n, 400n, 101n], { account: owner.account }),
+      buyRouter.write.setBuyFeeParams([301n, 200n, 0n], { account: owner.account }),
       buyRouter,
       "InvalidFeeParams"
     );
   });
 
-  it("setSellFeeParams reverts when taxBp > 25%", async function () {
+  it("setSellFeeParams reverts when taxBp increases", async function () {
     const { buyRouter, owner } = await networkHelpers.loadFixture(deployFixture);
     await viem.assertions.revertWithCustomError(
-      buyRouter.write.setSellFeeParams([2501n, 2500n, 2500n, 2500n, 2500n], { account: owner.account }),
+      buyRouter.write.setSellFeeParams([401n, 2500n, 2500n, 2500n, 2500n], { account: owner.account }),
       buyRouter,
       "InvalidFeeParams"
     );
@@ -301,20 +301,17 @@ describe("TCGVaultBuyRouter", function () {
     );
   });
 
-  it("buy with communityBp > 0 accrues community share and allows claim", async function () {
+  it("buy with reduced fee legs accrues recipients and keeps community at zero", async function () {
     const { owner, buyRouter, usdc, community } = await networkHelpers.loadFixture(deployFixture);
-    await buyRouter.write.setBuyFeeParams([1000n, 300n, 100n], { account: owner.account });
+    await buyRouter.write.setBuyFeeParams([200n, 100n, 0n], { account: owner.account });
     const usdcIn = parseUnits("500", 6);
     await usdc.write.mint([owner.account.address, usdcIn], { account: owner.account });
     await usdc.write.approve([buyRouter.address, usdcIn], { account: owner.account });
     const communityBefore = await usdc.read.balanceOf([community.account.address]);
     await buyRouter.write.buyTCGVWithUSDC([usdcIn, 0n, BigInt(Math.floor(Date.now() / 1000) + 300)], { account: owner.account });
     const pendingCommunity = await buyRouter.read.pendingUsdcFees([community.account.address]);
-    assert.ok(pendingCommunity > 0n);
-    await buyRouter.write.claimUsdcFees({ account: community.account });
-    const communityAfter = await usdc.read.balanceOf([community.account.address]);
-    assert.ok(communityAfter > communityBefore);
-    assert.strictEqual(await buyRouter.read.pendingUsdcFees([community.account.address]), 0n);
+    assert.strictEqual(pendingCommunity, 0n);
+    assert.strictEqual(await usdc.read.balanceOf([community.account.address]), communityBefore);
   });
 
   it("sell with fee accrues shares and recipients can claim", async function () {

@@ -43,7 +43,8 @@ Full tables, getters, and caps: [**FEE_REFERENCE.md**](FEE_REFERENCE.md).
 Use for **adding/removing liquidity** so TCGV does **not** charge fees on those transfers. Sets transient storage (EIP-1153) before calling the DEX router; `TCGVaultToken` skips fees when this slot is set. Requires **Cancun** (or later) hardfork for `tstore`/`tload`.
 
 ### Other contracts in this repo
-Founder NFT (`TCGVaultFounderNFT`), Initial Launch / presale (`TCGVaultInitialLaunch`), staking + Basic NFT (`TCGVaultStakingVault`, `TCGVaultBasicNFT`), converter, and TCGR are under `contracts/`; see [**PRODUCT_LIFECYCLE.md**](PRODUCT_LIFECYCLE.md).
+Founder NFT (`TCGVaultFounderNFT`), Initial Launch / presale (`TCGVaultInitialLaunch`), staking + Basic NFT (`TCGVaultStakingVault`, `TCGVaultBasicNFT`), converter, and TCGR are under `contracts/`; see [**PRODUCT_LIFECYCLE.md**](PRODUCT_LIFECYCLE.md).  
+Current schedule: Founder wave 1 runs 7 days from the first mint (or until sellout), wave 2 then runs 10 days, followed by a 120h presale countdown.
 
 ## Deployment Steps
 
@@ -94,9 +95,9 @@ Script: `yarn deploy:bsctest` → `scripts/deployBscTestnet.ts` on Hardhat netwo
 
 Authoritative detail: [**FEE_REFERENCE.md**](FEE_REFERENCE.md).
 
-**`TCGVaultToken` (direct pool):** default buy **6%** (`BUY_TAX = 600`) with shares **3333 / 3333 / 3334**; default sell **5%** (`SELL_TAX = 500`) with shares **4000 / 4000 / 2000 / 0**. No fee-driven supply burn on these paths. **`ADMIN_ROLE`** may update params via `setBuyFeeParams` / `setSellFeeParams` (shares sum to **10_000**; tax ≤ **`MAX_FEE_BP = 2500`**).
+**`TCGVaultToken` (direct pool):** default buy **6%** (`BUY_TAX = 600`) with shares **3333 / 3333 / 3334**; default sell **5%** (`SELL_TAX = 500`) with shares **4000 / 4000 / 2000 / 0**. No fee-driven supply burn on these paths. **`ADMIN_ROLE`** may update params via `setBuyFeeParams` / `setSellFeeParams` (shares sum to **10_000**; token caps are **`MAX_BUY_TAX_BP = 600`** and **`MAX_SELL_TAX_BP = 500`**, monotonic non-increasing).
 
-**`TCGVaultBuyRouter` (USDC):** default buy fee **5%** of USDC in (**300** + **200** + **0** bps); default sell **4%** of USDC out with share split **3750 / 2500 / 1250 / 2500** on the fee. No TCGV burn on router buy. Owner may call `setBuyFeeParams` / `setSellFeeParams` subject to **`MAX_FEE_BP`**.
+**`TCGVaultBuyRouter` (USDC):** default buy fee **5%** of USDC in (**300** + **200** + **0** bps); default sell **4%** of USDC out with share split **3750 / 2500 / 1250 / 2500** on the fee. No TCGV burn on router buy. Owner may call `setBuyFeeParams` / `setSellFeeParams` subject to router caps (**`MAX_BUY_TOTAL_BP = 500`**, **`MAX_SELL_TAX_BP = 400`**, monotonic non-increasing).
 
 ## Important Notes
 
@@ -112,11 +113,13 @@ Authoritative detail: [**FEE_REFERENCE.md**](FEE_REFERENCE.md).
 
 6. **Exclusions:** The token contract itself and the initial DEX router are excluded from fees by default; more routers added via `setDexRouter` are excluded too. Other addresses via `setExcludedFromFees` (including the deployer if you set it explicitly).
 
+7. **Presale custody + cooling-off refunds:** In `TCGVaultFounderNFT` and `TCGVaultInitialLaunch`, USDC is transferred directly to configured custody recipients (`caspUsdcRecipient` / `treasury`) and is not escrowed in-contract during the 14-day cancellation window. Cancellation functions (`cancelFounderPurchase`, `cancelOrder`) unwind on-chain entitlements and emit refund-due events for regulated off-chain repayment (`FounderPurchaseCancelled`, `PresaleOrderCancelled`). See [**PRODUCT_LIFECYCLE.md**](PRODUCT_LIFECYCLE.md#regulated-custody-and-cancellation-settlement).
+
 ## Security Considerations
 
 - The token uses `ReentrancyGuard` for sell operations; the buy router uses transient reentrancy protection.
 - **`ADMIN_ROLE`** can toggle fees via `setFeesEnabled`; pause / unpause use **`PAUSER_ROLE`** / **`UNPAUSER_ROLE`**; blacklist uses **`BLACKLISTER_ROLE`**. **`DEFAULT_ADMIN_ROLE`** is intended for granting/revoking those roles only (deployer holds all roles at construction).
-- Fee **rates and splits** are **governable** within caps (`MAX_FEE_BP = 2500` on token and router). Read on-chain values when integrating.
+- Fee **rates and splits** are **governable** within contract-specific caps (`TCGVaultToken`: 600/500; `TCGVaultBuyRouter`: 500/400) and monotonic non-increasing tax setters. Read on-chain values when integrating.
 - Emergency patterns (pause, blacklist) are documented in the Solidity files.
 
 ## Functions
@@ -132,7 +135,7 @@ Authoritative detail: [**FEE_REFERENCE.md**](FEE_REFERENCE.md).
 - `setFeesEnabled(bool)` — Enable/disable fees
 - `setCashbackEnabled(bool)` — Enable/disable cashback
 - `setMinAmounts(uint256, uint256)` — Set minimum buy/sell amounts for fee computation
-- `setBuyFeeParams` / `setSellFeeParams` — Update direct pool tax bps and recipient splits (within `MAX_FEE_BP`, shares sum to 10_000)
+- `setBuyFeeParams` / `setSellFeeParams` — Update direct pool tax bps and recipient splits (shares sum to 10_000; tax is bounded by `MAX_BUY_TAX_BP` / `MAX_SELL_TAX_BP` and cannot increase)
 - `setAllocationRecipients` — Liquidity / team / ops recipients required before supply recompute
 - `setBuyRouter` — Wire `TCGVaultBuyRouter` (zero address clears)
 - `setStakingVault` — Optional `TCGVaultStakingVault`; when set, `setBlacklisted(..., true)` redeems that account’s sTCGV to `vaultAddress` before seizing wallet TCGV

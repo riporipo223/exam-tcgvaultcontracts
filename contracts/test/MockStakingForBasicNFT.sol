@@ -7,7 +7,7 @@ import "../interfaces/ITCGVaultBasicNFT.sol";
 contract MockStakingForBasicNFT {
     uint256 public constant MIN = 100e18;
 
-    function minStakeForBasicNFT() external pure returns (uint256) {
+    function requiredStakeForBasicNFT() external pure returns (uint256) {
         return MIN;
     }
 

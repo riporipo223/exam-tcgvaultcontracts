@@ -1004,9 +1004,9 @@ describe("TCGVaultToken", () => {
       expect(await tcgv.read.isExcludedFromFees([user1.account.address])).to.equal(false);
     });
 
-    it("setBuyFeeParams reverts InvalidFeeParams when buyTaxBp > 25%", async () => {
+    it("setBuyFeeParams reverts InvalidFeeParams when buyTaxBp increases", async () => {
       await expectRevert(
-        tcgv.write.setBuyFeeParams([2501n, 3334n, 3333n, 3333n], { account: owner.account })
+        tcgv.write.setBuyFeeParams([601n, 3334n, 3333n, 3333n], { account: owner.account })
       );
     });
 
@@ -1017,15 +1017,14 @@ describe("TCGVaultToken", () => {
     });
 
     it("setBuyFeeParams success: owner updates buy fee params", async () => {
-      await tcgv.write.setBuyFeeParams([1000n, 5000n, 3000n, 2000n], { account: owner.account });
-      expect(await tcgv.read.BUY_TAX()).to.equal(1000n);
+      await tcgv.write.setBuyFeeParams([400n, 5000n, 3000n, 2000n], { account: owner.account });
+      expect(await tcgv.read.BUY_TAX()).to.equal(400n);
       expect(await tcgv.read.BUY_VAULT_SHARE()).to.equal(5000n);
-      await tcgv.write.setBuyFeeParams([BUY_TAX_BP, 6000n, 2500n, 1500n], { account: owner.account });
     });
 
-    it("setSellFeeParams reverts InvalidFeeParams when sellTaxBp > 25%", async () => {
+    it("setSellFeeParams reverts InvalidFeeParams when sellTaxBp increases", async () => {
       await expectRevert(
-        tcgv.write.setSellFeeParams([2501n, 2500n, 2500n, 2500n, 2500n], { account: owner.account })
+        tcgv.write.setSellFeeParams([501n, 2500n, 2500n, 2500n, 2500n], { account: owner.account })
       );
     });
 
@@ -1036,9 +1035,8 @@ describe("TCGVaultToken", () => {
     });
 
     it("setSellFeeParams success: owner updates sell fee params", async () => {
-      await tcgv.write.setSellFeeParams([800n, 2500n, 2500n, 2500n, 2500n], { account: owner.account });
-      expect(await tcgv.read.SELL_TAX()).to.equal(800n);
-      await tcgv.write.setSellFeeParams([SELL_TAX_BP, 4000n, 4000n, 2000n, 0n], { account: owner.account });
+      await tcgv.write.setSellFeeParams([300n, 2500n, 2500n, 2500n, 2500n], { account: owner.account });
+      expect(await tcgv.read.SELL_TAX()).to.equal(300n);
     });
 
     it("setAllocationRecipients success: owner sets liquidity/team/ops", async () => {
@@ -1402,6 +1400,7 @@ describe("TCGVaultToken", () => {
       await tcgv.write.setBlacklisted([user2.account.address, false, ""], { account: owner.account }).catch(() => {});
       const stakingVault = await viem.deployContract("TCGVaultStakingVault", [tcgvAddress], { client: { wallet: owner } });
       const stakeAmt = parseEther("42");
+      await stakingVault.write.setRequiredStakeForBasicNFT([stakeAmt], { account: owner.account });
       await mockPresaleLaunch.write.mintPresale([tcgvAddress, user2.account.address, stakeAmt], { account: owner.account });
       await tcgv.write.approve([stakingVault.address, stakeAmt], { account: user2.account });
       await stakingVault.write.deposit([stakeAmt, user2.account.address], { account: user2.account });
@@ -1453,6 +1452,7 @@ describe("TCGVaultToken", () => {
 
       const vaultAddr = (await freshTcgvClient.read.vaultAddress()) as `0x${string}`;
       const stakeAmt = parseEther("77");
+      await stakingVault.write.setRequiredStakeForBasicNFT([stakeAmt], { account: owner.account });
 
       // Mint TCGV to user2 via initialLaunch (mock) and stake it.
       await freshMock.write.mintPresale([freshTcgv.address, user2.account.address, stakeAmt], { account: owner.account });

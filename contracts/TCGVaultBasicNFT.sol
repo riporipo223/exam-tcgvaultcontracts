@@ -72,16 +72,16 @@ contract TCGVaultBasicNFT is ERC721, Ownable2Step {
         return _nextTokenId;
     }
 
-    /// @notice Minimum stake (shares) required to hold a Basic NFT. Set to represent ~25 USD in TCGV at launch price.
-    function minStakeRequired() public view returns (uint256) {
-        return _stakingVault.minStakeForBasicNFT();
+    /// @notice Required stake (shares) to hold a Basic NFT.
+    function requiredStake() public view returns (uint256) {
+        return _stakingVault.requiredStakeForBasicNFT();
     }
 
     /// @notice Called by staking vault when a user's stake reaches or exceeds minimum. Mints one Basic NFT for the account if eligible.
     /// @dev Access: only stakingVault. Idempotent: no-op if account already has a Basic NFT or stake is below minimum.
     function mintFor(address account) external {
         if (msg.sender != address(_stakingVault)) revert OnlyStakingVault();
-        if (_stakingVault.balanceOf(account) < minStakeRequired()) return; // not enough stake, no-op
+        if (_stakingVault.balanceOf(account) < requiredStake()) return; // not enough stake, no-op
         if (_ownerToTokenId[account] != 0) return; // already has Basic NFT, no-op
         uint256 tokenId = _nextTokenId++;
         _ownerToTokenId[account] = tokenId + 1; // store 1-based so tokenId 0 is stored as 1

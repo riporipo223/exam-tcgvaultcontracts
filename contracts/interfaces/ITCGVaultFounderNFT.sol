@@ -6,8 +6,8 @@ interface ITCGVaultFounderNFT {
     /// @return Number of Founder NFTs minted/sold so far.
     function soldCount() external view returns (uint256);
 
-    /// @notice Return timestamp when wave 2 started (250th Founder NFT sold).
-    /// @return UNIX timestamp for wave 2 start, or zero when wave 1 is still active.
+    /// @notice Return effective wave-2 start timestamp (time-based default, accelerated on wave-1 sellout).
+    /// @return UNIX timestamp for wave 2 start.
     function wave2StartTimestamp() external view returns (uint256);
 }
 

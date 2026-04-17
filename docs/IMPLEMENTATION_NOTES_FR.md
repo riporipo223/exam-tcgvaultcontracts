@@ -7,7 +7,7 @@ Description **factuelle** du comportement actuel des smart contracts dans ce dé
 - **Paire DEX (`TCGVaultToken`) :** taxe d’achat par défaut **6 %** en TCGV (tiers vault / marketing / `pendingAutolp`) ; taxe de vente **5 %** avec répartition par défaut sur la part taxe (**40 % / 40 % / 20 % / 0 %** vault / autolp / marketing / communauté). Pas de burn de supply lié aux frais de swap sur ce chemin.
 - **Routeur USDC (`TCGVaultBuyRouter`) :** frais d’achat en USDC (défaut **5 %** : **3 %** vault + **2 %** marketing) puis échange ; **100 %** du TCGV reçu pour l’acheteur. Vente : frais par défaut **4 %** sur l’USDC sortant, répartition documentée en **FEE_REFERENCE.md** §2.2.
 - **Cashback NEXUS :** sur les achats uniquement — **30 %** du montant en TCGV tant que la prévente est active sur le token, **10 %** après finalisation (`TCGVaultToken`).
-- **Paramètres modifiables :** `setBuyFeeParams` / `setSellFeeParams` sur le token (`ADMIN_ROLE`) et sur le routeur (`onlyOwner`), plafond **`MAX_FEE_BP = 25 %`**.
+- **Paramètres modifiables :** `setBuyFeeParams` / `setSellFeeParams` sur le token (`ADMIN_ROLE`) et sur le routeur (`onlyOwner`), avec plafonds spécifiques (**token :** `MAX_BUY_TAX_BP = 600`, `MAX_SELL_TAX_BP = 500` ; **routeur :** `MAX_BUY_TOTAL_BP = 500`, `MAX_SELL_TAX_BP = 400`) et taxes non croissantes.
 
 ## NEXUS (`TCGNexusToken`)
 
@@ -37,5 +37,5 @@ Description **factuelle** du comportement actuel des smart contracts dans ce dé
 
 ## Staking et NFT Basique
 
-- Vault **ERC-4626** sur le TCGV ; seuil `minStakeForBasicNFT` pour mint du NFT Basique au **receiver** ; retrait sous le minimum **brûle** le NFT Basique du wallet.
+- Vault **ERC-4626** sur le TCGV ; seuil `requiredStakeForBasicNFT` pour mint du NFT Basique au **receiver** ; retrait sous le minimum **brûle** le NFT Basique du wallet.
 - NFT Basique **soulbound**.

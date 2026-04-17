@@ -58,8 +58,10 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     /// @notice May call setBlacklisted().
     bytes32 public constant BLACKLISTER_ROLE = keccak256("BLACKLISTER_ROLE");
 
-    /// @notice Hard cap for configurable buy/sell tax rates (25%).
-    uint256 public constant MAX_FEE_BP = 2500;
+    /// @notice Absolute cap for direct-pool buy tax (6%, deployment default).
+    uint256 public constant MAX_BUY_TAX_BP = 600;
+    /// @notice Absolute cap for direct-pool sell tax (5%, deployment default).
+    uint256 public constant MAX_SELL_TAX_BP = 500;
     // Fee parameters (basis points, 10000 = 100%) — pool defaults; owner-modifiable
     uint256 public BUY_TAX = 600; // 6% (direct pool / DEX path)
     uint256 public SELL_TAX = 500; // 5% (direct pool / DEX path)
@@ -379,7 +381,8 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         uint256 marketingShareBp,
         uint256 autolpShareBp
     ) external onlyRole(ADMIN_ROLE) {
-        if (buyTaxBp > MAX_FEE_BP) revert InvalidFeeParams();
+        // Monotonic fee policy: tax may only stay the same or decrease.
+        if (buyTaxBp > BUY_TAX || buyTaxBp > MAX_BUY_TAX_BP) revert InvalidFeeParams();
         if (vaultShareBp + marketingShareBp + autolpShareBp != 10000) revert InvalidFeeParams();
         BUY_TAX = buyTaxBp;
         BUY_VAULT_SHARE = vaultShareBp;
@@ -399,7 +402,8 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         uint256 marketingShareBp,
         uint256 communityShareBp
     ) external onlyRole(ADMIN_ROLE) {
-        if (sellTaxBp > MAX_FEE_BP) revert InvalidFeeParams();
+        // Monotonic fee policy: tax may only stay the same or decrease.
+        if (sellTaxBp > SELL_TAX || sellTaxBp > MAX_SELL_TAX_BP) revert InvalidFeeParams();
         if (vaultShareBp + autolpShareBp + marketingShareBp + communityShareBp != 10000) {
             revert InvalidFeeParams();
         }

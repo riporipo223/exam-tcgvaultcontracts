@@ -25,6 +25,7 @@ contract TCGRToTCGVConverter is Ownable2Step {
     error ZeroAmount();
     error InsufficientTcgvReserve();
     error ZeroRatio();
+    error SlippageExceeded();
 
     constructor(address tcgr_, address tcgv_, uint256 ratio_) Ownable(msg.sender) {
         _tcgr = IERC20(tcgr_);
@@ -65,12 +66,15 @@ contract TCGRToTCGVConverter is Ownable2Step {
 
     /**
      * @notice Burn tcgrAmount TCGR and send (tcgrAmount * ratio) / 1e18 TCGV to msg.sender.
+     * @param tcgrAmount Amount of TCGR to burn.
+     * @param minTcgvOut Minimum acceptable TCGV output to protect against ratio changes before execution.
      * @dev Caller must have approved this contract on TCGR for at least `tcgrAmount` (ERC-20 allowance). This contract must be set as the TCGR converter.
      */
-    function convert(uint256 tcgrAmount) external {
+    function convert(uint256 tcgrAmount, uint256 minTcgvOut) external {
         if (tcgrAmount == 0) revert ZeroAmount();
         uint256 tcgvOut = (tcgrAmount * _ratio) / 1e18;
         if (tcgvOut == 0) revert ZeroAmount();
+        if (tcgvOut < minTcgvOut) revert SlippageExceeded();
         if (_tcgv.balanceOf(address(this)) < tcgvOut) revert InsufficientTcgvReserve();
 
         ITCGRToken(address(_tcgr)).burnForConversion(msg.sender, tcgrAmount);

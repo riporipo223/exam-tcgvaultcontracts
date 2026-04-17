@@ -4,6 +4,7 @@ pragma solidity 0.8.27;
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {ITCGVaultFounderNFT} from "./interfaces/ITCGVaultFounderNFT.sol";
 import {ITCGNexusToken} from "./interfaces/ITCGNexusToken.sol";
@@ -11,14 +12,17 @@ import {ITCGVaultToken} from "./interfaces/ITCGVaultToken.sol";
 
 /**
  * @title TCGVaultInitialLaunch
- * @notice Prévente (whitepaper §6): TCGV contre USDC. Vague 1: 0,005 $/TCGV jusqu'au 245ème NFT Founder.
- *   Vague 2: 0,008 $/TCGV, compte à rebours 120h puis clôture. Bonus 30 % en $TCGNEXUS. Cap 4 %/wallet, hard cap 600M TCGV.
+ * @notice Prévente (whitepaper §6): TCGV contre USDC. Vague 1: 0,005 $/TCGV jusqu'au start de la vague 2 Founder.
+ *   Vague 2: 0,008 $/TCGV. Après 10 jours de vague 2 Founder, compte à rebours 120h puis clôture.
+ *   Bonus 30 % en $TCGNEXUS. Cap 4 %/wallet, hard cap 600M TCGV.
  *   Vesting: 10 % TGE, puis 10 %/mois sur 9 mois.
  *
  * @dev Uses classic ReentrancyGuard instead of ReentrancyGuardTransient for compatibility
  *      with chains (e.g. BSC) that do not yet support EIP-1153 transient storage opcodes.
  */
 contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     struct UserAllocation {
         uint256 tcgvAllocated;
         uint256 tcgvClaimed;
@@ -40,8 +44,7 @@ contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
 
     uint256 public constant PRICE_WAVE1 = 0.005e6;   // 0,005 USDC (6 decimals) per TCGV
     uint256 public constant PRICE_WAVE2 = 0.008e6;    // 0,008 USDC (6 decimals) per TCGV
-    /// @notice Wave-1 price applies until 250 Founder NFTs are sold.
-    uint256 public constant FOUNDER_NFT_WAVE1_CAP = 250;
+    uint256 public constant FOUNDER_WAVE2_DURATION = 10 days;
     uint256 public constant PRESALE_COUNTDOWN_HOURS = 120;
     uint256 public constant HARD_CAP_TCGV = 600_000_000 * 1e18;
     uint256 public constant MAX_PER_WALLET_BP = 400; // 4 %
@@ -53,6 +56,8 @@ contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
 
     uint256 private constant CANCEL_WINDOW = 14 days;
     uint256 private constant FINALIZE_DELAY_AFTER_PRESALE_END = 20 days;
+    uint256 public constant MAX_PRESALE_DURATION = 365 days;
+    uint256 private immutable _presaleStartTimestamp;
 
     mapping(address => UserAllocation) private _allocations;
     uint256 private _nextOrderId;
@@ -62,6 +67,7 @@ contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
     event Claimed(address user, uint256 amount);
     event PresaleOrderCancelled(address user, uint256 orderId, uint256 usdcRefundDue, uint256 tcgvBurned, uint256 nexusClawedBack);
     event Finalized(uint256 tgeTimestamp);
+    event EmergencyFinalized(uint256 tgeTimestamp, address triggeredBy);
     event TreasuryUpdated(address treasury);
 
     error ZeroNexusToken();
@@ -78,6 +84,7 @@ contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
     error OrderAlreadyCancelled();
     error Unauthorized();
     error CancellationWindowEnded();
+    error EmergencyFinalizeNotAvailable();
 
     constructor(address tcgv_, address usdc_, address founderNFT_, address nexusToken_, address treasury_) Ownable(msg.sender) {
         if (nexusToken_ == address(0)) revert ZeroNexusToken();
@@ -86,6 +93,7 @@ contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
         _founderNFT = ITCGVaultFounderNFT(founderNFT_);
         _nexusToken = ITCGNexusToken(nexusToken_);
         _treasury = treasury_ != address(0) ? treasury_ : msg.sender;
+        _presaleStartTimestamp = block.timestamp;
         emit TreasuryUpdated(_treasury);
     }
 
@@ -98,6 +106,7 @@ contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
     function totalTCGVAllocated() external view returns (uint256) { return _totalTCGVAllocated; }
     function tgeTimestamp() external view returns (uint256) { return _tgeTimestamp; }
     function treasury() external view returns (address) { return _treasury; }
+    function presaleStartTimestamp() external view returns (uint256) { return _presaleStartTimestamp; }
 
     function allocations(address user) external view returns (uint256 tcgvAllocated, uint256 tcgvClaimed) {
         UserAllocation storage u = _allocations[user];
@@ -109,15 +118,24 @@ contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
         emit TreasuryUpdated(treasury_);
     }
 
-    /// @notice End of presale: 120h after the 245th Founder NFT sold (whitepaper §6 — compte à rebours 120h).
+    /// @notice Countdown start: 10 days after Founder wave 2 starts.
+    function presaleCountdownStartTime() public view returns (uint256) {
+        uint256 wave2Start = _founderNFT.wave2StartTimestamp();
+        if (wave2Start == 0) return type(uint256).max;
+        return wave2Start + FOUNDER_WAVE2_DURATION;
+    }
+
+    /// @notice End of presale: 120h after the end of the 10-day Founder wave-2 phase.
     function presaleEndTime() public view returns (uint256) {
-        uint256 w2 = _founderNFT.wave2StartTimestamp();
-        if (w2 == 0) return type(uint256).max;
-        return w2 + (PRESALE_COUNTDOWN_HOURS * 1 hours);
+        uint256 countdownStart = presaleCountdownStartTime();
+        if (countdownStart == type(uint256).max) return type(uint256).max;
+        return countdownStart + (PRESALE_COUNTDOWN_HOURS * 1 hours);
     }
 
     function currentPrice() public view returns (uint256) {
-        return _founderNFT.soldCount() < FOUNDER_NFT_WAVE1_CAP ? PRICE_WAVE1 : PRICE_WAVE2;
+        uint256 wave2Start = _founderNFT.wave2StartTimestamp();
+        if (wave2Start == 0 || block.timestamp < wave2Start) return PRICE_WAVE1;
+        return PRICE_WAVE2;
     }
 
     function maxPerWallet() public pure returns (uint256) {
@@ -125,7 +143,8 @@ contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
     }
 
     /**
-     * @notice Buy TCGV with USDC. Buyer receives 30 % of amount in $TCGNEXUS. Reverts after 120h countdown (wave 2).
+     * @notice Buy TCGV with USDC. Buyer receives 30 % of amount in $TCGNEXUS.
+     * @dev Reverts once the 120h countdown (starting after 10 days of Founder wave 2) has ended.
      */
     function buy(uint256 usdcAmount) external nonReentrant {
         if (_tgeTimestamp != 0) revert PresaleEnded();
@@ -160,7 +179,7 @@ contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
             _nexusToken.mintPresaleBonus(msg.sender, nexusAmount);
         }
 
-        _usdc.transferFrom(msg.sender, _treasury, usdcAmount);
+        _usdc.safeTransferFrom(msg.sender, _treasury, usdcAmount);
         emit Bought(msg.sender, usdcAmount, tcgvAmount, orderId, block.timestamp);
     }
 
@@ -200,14 +219,35 @@ contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
         );
     }
 
-    /// @notice Finalize presale and set TGE for vesting. Callable only after the 120h countdown (no early close by owner; no early close when hard cap is reached). Notifies TCGVaultToken to switch cashback from 30% to 10% and recompute supply (whitepaper §6).
-    function finalize() external {
-        if (_tgeTimestamp != 0) revert AlreadyFinalized();
-        if (block.timestamp < presaleEndTime() + FINALIZE_DELAY_AFTER_PRESALE_END) revert PresaleNotEnded();
+    function _canFinalizeNormally() private view returns (bool) {
+        uint256 end = presaleEndTime();
+        if (end == type(uint256).max) return false;
+        return block.timestamp >= end + FINALIZE_DELAY_AFTER_PRESALE_END;
+    }
+
+    function _finalize(bool emergency) private {
         _tgeTimestamp = block.timestamp;
         // Hard requirement: presale finalization and supply recompute must succeed; otherwise finalize reverts.
         ITCGVaultToken(address(_tcgv)).finalizePresaleAndRecompute();
+        if (emergency) {
+            emit EmergencyFinalized(_tgeTimestamp, msg.sender);
+            return;
+        }
         emit Finalized(_tgeTimestamp);
+    }
+
+    /// @notice Finalize presale and set TGE for vesting. Callable only after the 120h countdown + delay. Notifies TCGVaultToken to switch cashback from 30% to 10% and recompute supply (whitepaper §6).
+    function finalize() external {
+        if (_tgeTimestamp != 0) revert AlreadyFinalized();
+        if (!_canFinalizeNormally()) revert PresaleNotEnded();
+        _finalize(false);
+    }
+
+    /// @notice Emergency backstop: owner can finalize if presale exceeds max duration even when wave 2 never started.
+    function emergencyFinalize() external onlyOwner {
+        if (_tgeTimestamp != 0) revert AlreadyFinalized();
+        if (block.timestamp < _presaleStartTimestamp + MAX_PRESALE_DURATION) revert EmergencyFinalizeNotAvailable();
+        _finalize(true);
     }
 
     function releasable(address user) public view returns (uint256) {
@@ -228,7 +268,7 @@ contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
         uint256 amount = releasable(msg.sender);
         if (amount == 0) revert NothingToClaim();
         _allocations[msg.sender].tcgvClaimed += amount;
-        _tcgv.transfer(msg.sender, amount);
+        _tcgv.safeTransfer(msg.sender, amount);
         emit Claimed(msg.sender, amount);
     }
 }

@@ -2,7 +2,7 @@
 
 Fee and role behavior as implemented in **`contracts/`** in this repository. Always verify live parameters on deployed instances (`BUY_TAX`, `sellTaxBp()`, etc.) before integrating.
 
-**Basis points:** `10000` = 100%. **Mutability:** direct-pool taxes live on `TCGVaultToken` (`setBuyFeeParams` / `setSellFeeParams`, **`ADMIN_ROLE`**); USDC-router taxes live on `TCGVaultBuyRouter` (`setBuyFeeParams` / `setSellFeeParams`, **`onlyOwner`**). Each contract enforces **`MAX_FEE_BP = 2500`** (25%) on the configurable tax leg. **No fee-driven TCGV supply burn** on swap tax distribution in the current design (fees accrue to recipients / `pendingAutolp`; router sends 100% of purchased TCGV to the buyer).
+**Basis points:** `10000` = 100%. **Mutability:** direct-pool taxes live on `TCGVaultToken` (`setBuyFeeParams` / `setSellFeeParams`, **`ADMIN_ROLE`**); USDC-router taxes live on `TCGVaultBuyRouter` (`setBuyFeeParams` / `setSellFeeParams`, **`onlyOwner`**). Fee-rate setters are **monotonic non-increasing**: tax bps can only stay the same or decrease from the current on-chain value (never increase). Absolute caps match deployment defaults (`TCGVaultToken.MAX_BUY_TAX_BP = 600`, `TCGVaultToken.MAX_SELL_TAX_BP = 500`, `TCGVaultBuyRouter.MAX_BUY_TOTAL_BP = 500`, `TCGVaultBuyRouter.MAX_SELL_TAX_BP = 400`). **No fee-driven TCGV supply burn** on swap tax distribution paths (fees accrue to recipients / `pendingAutolp`; router sends 100% of purchased TCGV to the buyer).
 
 ---
 
@@ -75,8 +75,8 @@ Shares are basis points of the **fee slice** and must **sum to 10000** when call
 
 | Function | Who | Notes |
 |----------|-----|-------|
-| `setBuyFeeParams(vaultBp, marketingBp, communityBp)` | Owner | Sum of three ≤ `MAX_FEE_BP`. |
-| `setSellFeeParams(taxBp, vaultShareBp, autolpShareBp, marketingShareBp, communityShareBp)` | Owner | `taxBp` ≤ `MAX_FEE_BP`; four shares sum to **10000**. |
+| `setBuyFeeParams(vaultBp, marketingBp, communityBp)` | Owner | Each leg is monotonic non-increasing (`<=` current); total buy fee must also remain ≤ `MAX_BUY_TOTAL_BP` (500). |
+| `setSellFeeParams(taxBp, vaultShareBp, autolpShareBp, marketingShareBp, communityShareBp)` | Owner | `taxBp` is monotonic non-increasing (`<=` current) and ≤ `MAX_SELL_TAX_BP` (400); four shares sum to **10000**. |
 | `setReferralToken` | Owner | Optional TCGR referral integration. |
 
 ### 2.4 TCGR referral (optional)

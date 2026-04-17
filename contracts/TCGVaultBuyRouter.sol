@@ -5,6 +5,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ITCGVaultToken} from "./interfaces/ITCGVaultToken.sol";
 import {ITCGRToken} from "./interfaces/ITCGRToken.sol";
 import {IPancakeFactory, IPancakePair, IPancakeRouter02} from "./interfaces/IPancakeV2.sol";
@@ -33,8 +34,12 @@ error NoFeesToClaim();
  *      Uses {ReentrancyGuardTransient} (EIP-1153) for buy/sell entrypoints; requires a chain that supports transient storage.
  */
 contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
-    /// @notice Hard cap for configurable buy/sell tax rates (25%).
-    uint256 public constant MAX_FEE_BP = 2500;
+    using SafeERC20 for IERC20;
+
+    /// @notice Absolute cap for total buy fee (5%, deployment default sum: 300 + 200 + 0).
+    uint256 public constant MAX_BUY_TOTAL_BP = 500;
+    /// @notice Absolute cap for sell tax (4%, deployment default).
+    uint256 public constant MAX_SELL_TAX_BP = 400;
 
     // Fee params (basis points) — owner-modifiable.
     // Buy: USDC fee split (vault + marketing + community)
@@ -132,14 +137,18 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
 
     /**
      * @notice Update buy fee parameters (router mode).
-     * @dev `vaultBp + marketingBp + communityBp` is taken from USDC in before swap. Sum must not exceed MAX_FEE_BP.
+     * @dev `vaultBp + marketingBp + communityBp` is taken from USDC in before swap.
+     *      Monotonic policy: each leg may only stay the same or decrease.
      */
     function setBuyFeeParams(
         uint256 vaultBp,
         uint256 marketingBp,
         uint256 communityBp
     ) external onlyOwner {
-        if (vaultBp + marketingBp + communityBp > MAX_FEE_BP) revert InvalidFeeParams();
+        if (vaultBp > _buyVaultBp || marketingBp > _buyMarketingBp || communityBp > _buyCommunityBp) {
+            revert InvalidFeeParams();
+        }
+        if (vaultBp + marketingBp + communityBp > MAX_BUY_TOTAL_BP) revert InvalidFeeParams();
         _buyVaultBp = vaultBp;
         _buyMarketingBp = marketingBp;
         _buyCommunityBp = communityBp;
@@ -157,7 +166,8 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
         uint256 marketingShareBp,
         uint256 communityShareBp
     ) external onlyOwner {
-        if (taxBp > MAX_FEE_BP) revert InvalidFeeParams();
+        // Monotonic fee policy: sell tax may only stay the same or decrease.
+        if (taxBp > _sellTaxBp || taxBp > MAX_SELL_TAX_BP) revert InvalidFeeParams();
         if (vaultShareBp + autolpShareBp + marketingShareBp + communityShareBp != 10000) {
             revert InvalidFeeParams();
         }
@@ -250,7 +260,7 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
      */
     function _buyWithUSDC(uint256 usdcAmount, uint256 amountOutMin) private returns (uint256 tcgvToUser, uint256 feeUSDC) {
         // Pull USDC from user (reverts on failure)
-        _usdc.transferFrom(msg.sender, address(this), usdcAmount);
+        _usdc.safeTransferFrom(msg.sender, address(this), usdcAmount);
 
         uint256 vaultUSDC = (usdcAmount * _buyVaultBp) / 10000;
         uint256 marketingUSDC = (usdcAmount * _buyMarketingBp) / 10000;
@@ -269,7 +279,7 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
 
         // Get pair address and transfer USDC to pair
         address pair = _pairFor(path[0], path[1]);
-        _usdc.transfer(pair, swapAmount);
+        _usdc.safeTransfer(pair, swapAmount);
 
         // Record balance before swap
         uint256 balanceBefore = _tcgv.balanceOf(address(this));
@@ -286,7 +296,7 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
         // Mint NEXUS cashback and transfer TCGV to user
         tcgvToUser = tcgvReceived;
         _tcgv.recordBuyAndMintCashback(msg.sender, tcgvReceived);
-        _tcgv.transfer(msg.sender, tcgvToUser);
+        IERC20(address(_tcgv)).safeTransfer(msg.sender, tcgvToUser);
     }
 
     /**
@@ -305,7 +315,7 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
         if (deadline < block.timestamp) revert Expired();
 
         // Pull TCGV from user
-        _tcgv.transferFrom(msg.sender, address(this), amountIn);
+        IERC20(address(_tcgv)).safeTransferFrom(msg.sender, address(this), amountIn);
 
         // Build path [TCGV, USDC]
         address[] memory path = new address[](2);
@@ -314,7 +324,7 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
 
         // Get pair address and transfer TCGV to pair
         address pair = _pairFor(path[0], path[1]);
-        _tcgv.transfer(pair, amountIn);
+        IERC20(address(_tcgv)).safeTransfer(pair, amountIn);
 
         // Execute swap and get USDC
         uint256 usdcBefore = _usdc.balanceOf(address(this));
@@ -343,7 +353,7 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
             if (communityUsdc > 0) _pendingUsdcFees[_community] += communityUsdc;
         }
 
-        _usdc.transfer(msg.sender, userUsdc);
+        _usdc.safeTransfer(msg.sender, userUsdc);
 
         emit SellTCGVForUSDC(msg.sender, amountIn, feeUsdc, userUsdc);
     }
@@ -355,7 +365,7 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
         uint256 amount = _pendingUsdcFees[msg.sender];
         if (amount == 0) revert NoFeesToClaim();
         _pendingUsdcFees[msg.sender] = 0;
-        _usdc.transfer(msg.sender, amount);
+        _usdc.safeTransfer(msg.sender, amount);
         emit UsdcFeesClaimed(msg.sender, amount);
     }
 

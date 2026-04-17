@@ -66,7 +66,7 @@ describe("TCGRToTCGVConverter", function () {
 
     const userTcgvBefore = await mockTcgv.read.balanceOf([user.account.address]);
     await tcgr.write.approve([converter.address, amount], { account: user.account });
-    await converter.write.convert([amount], { account: user.account });
+    await converter.write.convert([amount, amount], { account: user.account });
     const userTcgvAfter = await mockTcgv.read.balanceOf([user.account.address]);
 
     assert.strictEqual(await tcgr.read.balanceOf([user.account.address]), 0n);
@@ -82,7 +82,7 @@ describe("TCGRToTCGVConverter", function () {
     await mintTcgrToUser(tcgr, minter, referee, user.account.address, parseEther("100"));
     const userTcgvBefore = await mockTcgv.read.balanceOf([user.account.address]);
     await tcgr.write.approve([converter.address, parseEther("100")], { account: user.account });
-    await converter.write.convert([parseEther("100")], { account: user.account });
+    await converter.write.convert([parseEther("100"), parseEther("50")], { account: user.account });
     const userTcgvAfter = await mockTcgv.read.balanceOf([user.account.address]);
     assert.strictEqual(userTcgvAfter - userTcgvBefore, parseEther("50"));
     assert.strictEqual(await tcgr.read.balanceOf([user.account.address]), 0n);
@@ -112,12 +112,25 @@ describe("TCGRToTCGVConverter", function () {
     );
   });
 
+  it("convert reverts when output falls below minTcgvOut", async function () {
+    const { tcgr, converter, owner, minter, user, referee } = await networkHelpers.loadFixture(deployFixture);
+    const amount = parseEther("100");
+    await mintTcgrToUser(tcgr, minter, referee, user.account.address, amount);
+    await tcgr.write.approve([converter.address, amount], { account: user.account });
+    await converter.write.setRatio([parseEther("0.5")], { account: owner.account });
+    await viem.assertions.revertWithCustomError(
+      converter.write.convert([amount, amount], { account: user.account }),
+      converter,
+      "SlippageExceeded"
+    );
+  });
+
   it("convert reverts when insufficient TCGV reserve", async function () {
     const { tcgr, mockTcgv, converter, minter, user, referee } = await networkHelpers.loadFixture(deployFixture);
     await mintTcgrToUser(tcgr, minter, referee, user.account.address, parseEther("200000"));
     await tcgr.write.approve([converter.address, parseEther("200000")], { account: user.account });
     await viem.assertions.revertWithCustomError(
-      converter.write.convert([parseEther("200000")], { account: user.account }),
+      converter.write.convert([parseEther("200000"), parseEther("200000")], { account: user.account }),
       converter,
       "InsufficientTcgvReserve"
     );
@@ -126,7 +139,7 @@ describe("TCGRToTCGVConverter", function () {
   it("convert reverts ZeroAmount for zero input", async function () {
     const { converter, user } = await networkHelpers.loadFixture(deployFixture);
     await viem.assertions.revertWithCustomError(
-      converter.write.convert([0n], { account: user.account }),
+      converter.write.convert([0n, 0n], { account: user.account }),
       converter,
       "ZeroAmount"
     );
@@ -153,7 +166,7 @@ describe("TCGRToTCGVConverter", function () {
     await tcgr.write.processValidatedBuy([referee.account.address, usdc6ForTcgrReward(1n)], { account: minter.account });
     await tcgr.write.approve([converter.address, 1n], { account: user.account });
     await viem.assertions.revertWithCustomError(
-      converter.write.convert([1n], { account: user.account }),
+      converter.write.convert([1n, 0n], { account: user.account }),
       converter,
       "ZeroAmount"
     );
@@ -183,7 +196,7 @@ describe("TCGRToTCGVConverter", function () {
     const amount = parseEther("77");
     await mintTcgrToUser(tcgr, minter, referee, user.account.address, amount);
     await tcgr.write.approve([converter.address, amount], { account: user.account });
-    const hash = await converter.write.convert([amount], { account: user.account });
+    const hash = await converter.write.convert([amount, amount], { account: user.account });
     const publicClient = await viem.getPublicClient();
     const receipt = await publicClient!.waitForTransactionReceipt({ hash });
     const logs = await publicClient!.getContractEvents({

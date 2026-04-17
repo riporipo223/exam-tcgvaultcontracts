@@ -392,12 +392,12 @@ async function main() {
     ? parseEther(process.env.BASIC_NFT_MIN_STAKE.trim())
     : parseEther("5000");
   const stakingVaultContract = await viem.getContractAt("TCGVaultStakingVault", stakingVaultAddress);
-  h = await stakingVaultContract.write.setMinStakeForBasicNFT([minStakeForBasic], { account: deployer.account });
+  h = await stakingVaultContract.write.setRequiredStakeForBasicNFT([minStakeForBasic], { account: deployer.account });
   await waitForTxReceipt(h);
   h = await stakingVaultContract.write.setBasicNFTContract([basicNFTAddress], { account: deployer.account });
   await waitForTxReceipt(h);
   console.log(
-    "stakingVault.setMinStakeForBasicNFT / setBasicNFTContract ✓ (min shares:",
+    "stakingVault.setRequiredStakeForBasicNFT / setBasicNFTContract ✓ (required shares:",
     minStakeForBasic.toString(),
     ")",
   );
@@ -439,6 +439,10 @@ async function main() {
   h = await token.write.setBuyRouter([buyRouterAddress], { account: deployer.account });
   await waitForTxReceipt(h);
   console.log("token.setBuyRouter ✓");
+
+  h = await stakingVaultContract.write.setBasicNFTPricingRouter([buyRouterAddress], { account: deployer.account });
+  await waitForTxReceipt(h);
+  console.log("stakingVault.setBasicNFTPricingRouter(buyRouter) ✓ (dynamic ~25 USDC threshold)");
 
   const wrapper = await deployTracked(
     "contracts/TCGVaultLiquidityWrapper.sol:TCGVaultLiquidityWrapper",
