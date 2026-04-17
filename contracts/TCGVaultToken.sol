@@ -500,7 +500,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         uint256 claimable = _teamVestingClaimable();
         if (claimable == 0) revert NoTeamVestingToClaim();
         teamVestingClaimed += claimable;
-        super._update(address(this), teamRecipient, claimable);
+        _update(address(this), teamRecipient, claimable);
         emit TeamVestingClaimed(teamRecipient, claimable);
     }
 
@@ -511,7 +511,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         uint256 claimable = _opsVestingClaimable();
         if (claimable == 0) revert NoOpsVestingToClaim();
         opsVestingClaimed += claimable;
-        super._update(address(this), opsRecipient, claimable);
+        _update(address(this), opsRecipient, claimable);
         emit OpsVestingClaimed(opsRecipient, claimable);
     }
 
@@ -704,7 +704,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         uint256 amount = pendingAutolp;
         if (amount == 0) return;
         pendingAutolp = 0;
-        super._update(address(this), vaultAddress, amount);
+        _update(address(this), vaultAddress, amount);
         emit PendingAutolpExecuted(amount);
     }
 
