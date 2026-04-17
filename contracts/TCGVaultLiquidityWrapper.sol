@@ -8,6 +8,8 @@ import {IRouter} from "./interfaces/IRouter.sol";
 
 /// @notice Router not in the allowed list.
 error RouterNotAllowed();
+/// @notice Token transfer received fewer tokens than expected.
+error FeeOnTransferTokenNotSupported(address token, uint256 expected, uint256 received);
 
 /**
  * @title TCGVaultLiquidityWrapper
@@ -46,6 +48,7 @@ contract TCGVaultLiquidityWrapper is Ownable2Step {
     }
 
     /// @notice Add liquidity. Caller approves this contract for TCGV and tokenB. LP tokens go to caller.
+    /// @dev Fee-on-transfer tokens are not supported for add liquidity.
     function addLiquidity(
         address router,
         address tokenB,
@@ -56,8 +59,8 @@ contract TCGVaultLiquidityWrapper is Ownable2Step {
         uint256 deadline
     ) external returns (uint256 amountA, uint256 amountB, uint256 liquidity) {
         if (!_allowedRouters[router]) revert RouterNotAllowed();
-        IERC20(tcgvToken).transferFrom(msg.sender, address(this), amountADesired);
-        IERC20(tokenB).transferFrom(msg.sender, address(this), amountBDesired);
+        _pullExact(tcgvToken, msg.sender, amountADesired);
+        _pullExact(tokenB, msg.sender, amountBDesired);
         IERC20(tcgvToken).approve(router, amountADesired);
         IERC20(tokenB).approve(router, amountBDesired);
         (amountA, amountB, liquidity) = IRouter(router).addLiquidity(
@@ -70,6 +73,8 @@ contract TCGVaultLiquidityWrapper is Ownable2Step {
             msg.sender,
             deadline
         );
+        IERC20(tcgvToken).approve(router, 0);
+        IERC20(tokenB).approve(router, 0);
         if (amountA < amountADesired) {
             IERC20(tcgvToken).transfer(msg.sender, amountADesired - amountA);
         }
@@ -102,6 +107,7 @@ contract TCGVaultLiquidityWrapper is Ownable2Step {
             address(this),
             deadline
         );
+        IERC20(lpToken).approve(router, 0);
         // Forward by balance delta (pair token0/token1 order may differ from TCGV/tokenB param order).
         uint256 tcgvOut = IERC20(tcgvToken).balanceOf(address(this)) - tcgvBefore;
         uint256 tokenBOut = IERC20(tokenB).balanceOf(address(this)) - tokenBBefore;
@@ -112,5 +118,14 @@ contract TCGVaultLiquidityWrapper is Ownable2Step {
             IERC20(tokenB).transfer(msg.sender, tokenBOut);
         }
         return (tcgvOut, tokenBOut);
+    }
+
+    function _pullExact(address token, address from, uint256 expectedAmount) private {
+        uint256 balanceBefore = IERC20(token).balanceOf(address(this));
+        IERC20(token).transferFrom(from, address(this), expectedAmount);
+        uint256 receivedAmount = IERC20(token).balanceOf(address(this)) - balanceBefore;
+        if (receivedAmount != expectedAmount) {
+            revert FeeOnTransferTokenNotSupported(token, expectedAmount, receivedAmount);
+        }
     }
 }

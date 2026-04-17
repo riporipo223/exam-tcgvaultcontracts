@@ -177,6 +177,7 @@ contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
         o.cancelled = true;
 
         uint256 tcgvAmount = o.tcgvAmount;
+        uint256 actualNexusBurned;
         UserAllocation storage u = _allocations[msg.sender];
         u.tcgvAllocated -= tcgvAmount;
         _totalTCGVAllocated -= tcgvAmount;
@@ -185,7 +186,9 @@ contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
         ITCGVaultToken(address(_tcgv)).burnPresaleAllocation(address(this), tcgvAmount);
 
         if (o.nexusAmount > 0) {
-            _nexusToken.clawBackPresaleBonus(msg.sender, o.nexusAmount);
+            uint256 nexusBalance = IERC20(address(_nexusToken)).balanceOf(msg.sender);
+            actualNexusBurned = o.nexusAmount > nexusBalance ? nexusBalance : o.nexusAmount;
+            if (actualNexusBurned > 0) _nexusToken.clawBackPresaleBonus(msg.sender, actualNexusBurned);
         }
 
         emit PresaleOrderCancelled(
@@ -193,7 +196,7 @@ contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
             orderId,
             o.usdcAmount,
             tcgvAmount,
-            o.nexusAmount
+            actualNexusBurned
         );
     }
 
