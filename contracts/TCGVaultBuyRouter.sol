@@ -73,6 +73,9 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
         uint256 marketingShareBp,
         uint256 communityShareBp
     );
+
+    error InvalidFeeParams();
+
     // External getters (private/external pattern)
     function router() external view returns (address) { return _router; }
     function factory() external view returns (address) { return _factory; }
@@ -345,8 +348,6 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
 
         emit SellTCGVForUSDC(msg.sender, amountIn, feeUsdc, userUsdc);
     }
-
-    error InvalidFeeParams();
 
     // No need to receive native BNB/ETH; all flows are in ERC20 tokens (USDC, TCGV).
 }

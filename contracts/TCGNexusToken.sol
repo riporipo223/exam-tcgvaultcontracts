@@ -16,6 +16,17 @@ import {Nonces} from "@openzeppelin/contracts/utils/Nonces.sol";
  *      Obtention : cashback TCGV (minter) + bonus 30% prévente (immutable FounderNFT + InitialLaunch only).
  */
 contract TCGNexusToken is ERC20Permit, ERC20Votes, Ownable2Step {
+    /// @notice TCGVaultToken contract; only it can mint cashback. Set at deployment, immutable.
+    address private immutable _minter;
+    /// @notice Only these contracts may mint/burn the 30% presale NEXUS bonus (whitepaper §6, §7). Immutable.
+    address private immutable _founderNFTPresaleBonus;
+    address private immutable _initialLaunchPresaleBonus;
+
+    event CashbackMinted(address recipient, uint256 amount);
+    event PresaleBonusMinted(address recipient, uint256 amount);
+    event OwnerMinted(address to, uint256 amount);
+    event PresaleBonusClawedBack(address holder, uint256 amount);
+
     /// @notice Minter can only be the TCGVaultToken contract.
     error OnlyMinter();
     /// @notice Caller is neither FounderNFT nor InitialLaunch presale bonus contract.
@@ -26,34 +37,6 @@ contract TCGNexusToken is ERC20Permit, ERC20Votes, Ownable2Step {
     error ZeroAmount();
     /// @notice Nexus is Soulbound; transfers between accounts are not allowed (whitepaper).
     error SoulboundTransferNotAllowed();
-
-    /// @notice TCGVaultToken contract; only it can mint cashback. Set at deployment, immutable.
-    address private immutable _minter;
-    /// @notice Only these contracts may mint/burn the 30% presale NEXUS bonus (whitepaper §6, §7). Immutable.
-    address private immutable _founderNFTPresaleBonus;
-    address private immutable _initialLaunchPresaleBonus;
-
-    // External getters (private/external pattern)
-    function minter() external view returns (address) {
-        return _minter;
-    }
-
-    function founderNFTPresaleBonus() external view returns (address) {
-        return _founderNFTPresaleBonus;
-    }
-
-    function initialLaunchPresaleBonus() external view returns (address) {
-        return _initialLaunchPresaleBonus;
-    }
-
-    function isPresaleBonusContract(address account) external view returns (bool) {
-        return account == _founderNFTPresaleBonus || account == _initialLaunchPresaleBonus;
-    }
-
-    event CashbackMinted(address recipient, uint256 amount);
-    event PresaleBonusMinted(address recipient, uint256 amount);
-    event OwnerMinted(address to, uint256 amount);
-    event PresaleBonusClawedBack(address holder, uint256 amount);
 
     constructor(
         address minter_,
@@ -73,6 +56,23 @@ contract TCGNexusToken is ERC20Permit, ERC20Votes, Ownable2Step {
             revert OnlyPresaleBonusContract();
         }
         _;
+    }
+
+    // External getters (private/external pattern)
+    function minter() external view returns (address) {
+        return _minter;
+    }
+
+    function founderNFTPresaleBonus() external view returns (address) {
+        return _founderNFTPresaleBonus;
+    }
+
+    function initialLaunchPresaleBonus() external view returns (address) {
+        return _initialLaunchPresaleBonus;
+    }
+
+    function isPresaleBonusContract(address account) external view returns (bool) {
+        return account == _founderNFTPresaleBonus || account == _initialLaunchPresaleBonus;
     }
 
     /// @dev Resolve nonces() conflict between ERC20Permit and Votes (both use Nonces).

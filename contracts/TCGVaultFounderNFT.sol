@@ -49,18 +49,19 @@ contract TCGVaultFounderNFT is ERC721, Ownable2Step, ReentrancyGuard {
     mapping(uint256 => uint256) private _nexusBonusForToken;
     mapping(uint256 => bool) private _cancelled;
 
-    // External getters (private/external pattern)
-    function usdc() external view returns (address) { return address(_usdc); }
-    function nexusToken() external view returns (address) { return address(_nexusToken); }
-    function wave2StartTimestamp() external view returns (uint256) { return _wave2StartTimestamp; }
-    function caspUsdcRecipient() external view returns (address) { return _caspUsdcRecipient; }
-    function ownerWave1Mints() external view returns (uint256) { return _ownerWave1Mints; }
-    function ownerWave2Mints() external view returns (uint256) { return _ownerWave2Mints; }
-
     event CaspUsdcRecipientUpdated(address caspUsdcRecipient);
     event BaseURIUpdated(string baseURI);
     event FounderMinted(address buyer, uint256 tokenId, uint256 usdcAmount, uint256 nexusAmount, uint256 purchasedAt);
     event FounderPurchaseCancelled(address buyer, uint256 tokenId, uint256 usdcRefundDue, uint256 nexusClawedBack);
+
+    error Unauthorized();
+    error AlreadyCancelled();
+    error NotPurchasable();
+    error CancellationWindowEnded();
+    error ZeroAddress();
+    error ExceedsSupply();
+    error OwnerWaveQuotaExceeded();
+    error ReservedForOwner();
 
     constructor(address usdc_, address nexusToken_, address caspUsdcRecipient_)
         ERC721("TCG-VAULT Founder", "TCGVF")
@@ -75,6 +76,14 @@ contract TCGVaultFounderNFT is ERC721, Ownable2Step, ReentrancyGuard {
         _caspUsdcRecipient = caspUsdcRecipient_;
         emit CaspUsdcRecipientUpdated(caspUsdcRecipient_);
     }
+
+    // External getters (private/external pattern)
+    function usdc() external view returns (address) { return address(_usdc); }
+    function nexusToken() external view returns (address) { return address(_nexusToken); }
+    function wave2StartTimestamp() external view returns (uint256) { return _wave2StartTimestamp; }
+    function caspUsdcRecipient() external view returns (address) { return _caspUsdcRecipient; }
+    function ownerWave1Mints() external view returns (uint256) { return _ownerWave1Mints; }
+    function ownerWave2Mints() external view returns (uint256) { return _ownerWave2Mints; }
 
     /// @notice Number of Founder NFTs sold (paid mints). Drives presale price wave and 120h countdown.
     function soldCount() external view returns (uint256) {
@@ -173,13 +182,4 @@ contract TCGVaultFounderNFT is ERC721, Ownable2Step, ReentrancyGuard {
 
         emit FounderPurchaseCancelled(msg.sender, tokenId, usdcRefundDue, nexusClawedBack);
     }
-
-    error Unauthorized();
-    error AlreadyCancelled();
-    error NotPurchasable();
-    error CancellationWindowEnded();
-    error ZeroAddress();
-    error ExceedsSupply();
-    error OwnerWaveQuotaExceeded();
-    error ReservedForOwner();
 }

@@ -20,6 +20,17 @@ contract TCGVaultBasicNFT is ERC721, Ownable2Step {
     /// @dev One Basic NFT per wallet (whitepaper: "mint gratuit" + staking requirement).
     mapping(address => uint256) private _ownerToTokenId;
 
+    event StakingVaultUpdated(address stakingVault);
+    event BaseURIUpdated(string baseURI);
+
+    error OnlyStakingVault();
+    error Soulbound();
+
+    constructor(address stakingVault_) ERC721("TCG-VAULT Basic", "TCGVB") Ownable(msg.sender) {
+        _stakingVault = ITCGVaultStakingVault(stakingVault_);
+        emit StakingVaultUpdated(stakingVault_);
+    }
+
     // External getters (private/external pattern)
     function stakingVault() external view returns (address) {
         return address(_stakingVault);
@@ -31,14 +42,6 @@ contract TCGVaultBasicNFT is ERC721, Ownable2Step {
 
     function ownerToTokenId(address owner) external view returns (uint256) {
         return _ownerToTokenId[owner];
-    }
-
-    event StakingVaultUpdated(address stakingVault);
-    event BaseURIUpdated(string baseURI);
-
-    constructor(address stakingVault_) ERC721("TCG-VAULT Basic", "TCGVB") Ownable(msg.sender) {
-        _stakingVault = ITCGVaultStakingVault(stakingVault_);
-        emit StakingVaultUpdated(stakingVault_);
     }
 
     function setBaseURI(string calldata baseURI_) external onlyOwner {
@@ -103,7 +106,4 @@ contract TCGVaultBasicNFT is ERC721, Ownable2Step {
         if (to != address(0)) _ownerToTokenId[to] = tokenId + 1; // 1-based so 0 = not minted
         return super._update(to, tokenId, auth);
     }
-
-    error OnlyStakingVault();
-    error Soulbound();
 }

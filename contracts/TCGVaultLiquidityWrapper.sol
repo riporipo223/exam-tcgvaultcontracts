@@ -18,12 +18,12 @@ error RouterNotAllowed();
  *      so the pair→EOA transfer (otherwise taxed as a “buy”) never happens on-chain.
  */
 contract TCGVaultLiquidityWrapper is Ownable2Step {
-    event AllowedRouterUpdated(address router, bool allowed);
-
     /// @notice The TCGV token this wrapper pulls and forwards.
     address public immutable tcgvToken;
     /// @notice Routers that may be used for add/remove liquidity.
     mapping(address => bool) private _allowedRouters;
+
+    event AllowedRouterUpdated(address router, bool allowed);
 
     function allowedRouters(address router) external view returns (bool) {
         return _allowedRouters[router];

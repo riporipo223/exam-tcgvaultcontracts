@@ -21,12 +21,13 @@ error OnlyAssetToken();
  *   Withdraw/redeem revert if the share `owner` is blacklisted on `ITCGVaultToken(asset())`. The asset token may call `forceWithdrawFromBlacklist` during blacklist to redeem all shares to the protocol vault.
  */
 contract TCGVaultStakingVault is ERC4626, Ownable2Step {
-    event MinStakeForBasicNFTUpdated(uint256 minShares);
-    event BasicNFTContractUpdated(address basicNFT);
     /// @notice Minimum shares required to hold a Basic NFT. Below this, Basic NFT is burned on withdraw.
     uint256 private _minStakeForBasicNFT;
     /// @notice Basic NFT contract to call when stake drops below minimum.
     address private _basicNFTContract;
+
+    event MinStakeForBasicNFTUpdated(uint256 minShares);
+    event BasicNFTContractUpdated(address basicNFT);
 
     // External getters (private/external pattern)
     function minStakeForBasicNFT() external view returns (uint256) {

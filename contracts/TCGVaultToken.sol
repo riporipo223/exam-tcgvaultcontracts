@@ -177,6 +177,8 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     /// @notice USDC-path buy router (`recordBuyAndMintCashback` / `burn`); `address(0)` clears.
     event BuyRouterUpdated(address buyRouter);
 
+    error InvalidFeeParams();
+
     /// @notice Whitepaper §4.1: TCG-VAULT Token, TCGV, 1 milliard supply, BNB Chain.
     /// @param dexRouter_ Initial Uniswap V2–style router (read-only `factory()`, fee-excluded). Add more via `setDexRouter`; register pools with `setPair`.
     constructor(
@@ -707,6 +709,4 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         _update(address(this), vaultAddress, amount);
         emit PendingAutolpExecuted(amount);
     }
-
-    error InvalidFeeParams();
 }

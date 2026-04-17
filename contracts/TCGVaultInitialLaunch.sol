@@ -19,6 +19,20 @@ import {ITCGVaultToken} from "./interfaces/ITCGVaultToken.sol";
  *      with chains (e.g. BSC) that do not yet support EIP-1153 transient storage opcodes.
  */
 contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
+    struct UserAllocation {
+        uint256 tcgvAllocated;
+        uint256 tcgvClaimed;
+    }
+
+    struct Order {
+        address buyer;
+        uint256 usdcAmount;
+        uint256 tcgvAmount;
+        uint256 nexusAmount;
+        uint256 purchasedAt;
+        bool cancelled;
+    }
+
     IERC20 private immutable _tcgv;
     IERC20 private immutable _usdc;
     ITCGVaultFounderNFT private immutable _founderNFT;
@@ -40,22 +54,40 @@ contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
     uint256 private constant CANCEL_WINDOW = 14 days;
     uint256 private constant FINALIZE_DELAY_AFTER_PRESALE_END = 20 days;
 
-    struct UserAllocation {
-        uint256 tcgvAllocated;
-        uint256 tcgvClaimed;
-    }
     mapping(address => UserAllocation) private _allocations;
-
-    struct Order {
-        address buyer;
-        uint256 usdcAmount;
-        uint256 tcgvAmount;
-        uint256 nexusAmount;
-        uint256 purchasedAt;
-        bool cancelled;
-    }
     uint256 private _nextOrderId;
     mapping(uint256 => Order) private _orders;
+
+    event Bought(address user, uint256 usdcAmount, uint256 tcgvAllocated, uint256 orderId, uint256 purchasedAt);
+    event Claimed(address user, uint256 amount);
+    event PresaleOrderCancelled(address user, uint256 orderId, uint256 usdcRefundDue, uint256 tcgvBurned, uint256 nexusClawedBack);
+    event Finalized(uint256 tgeTimestamp);
+    event TreasuryUpdated(address treasury);
+
+    error ZeroNexusToken();
+    error PresaleEnded();
+    error PresaleCountdownEnded();
+    error PresaleNotEnded();
+    error ZeroAmount();
+    error ExceedsHardCap();
+    error ExceedsWalletCap();
+    error AlreadyFinalized();
+    error NotFinalized();
+    error NothingToClaim();
+    error InvalidOrder();
+    error OrderAlreadyCancelled();
+    error Unauthorized();
+    error CancellationWindowEnded();
+
+    constructor(address tcgv_, address usdc_, address founderNFT_, address nexusToken_, address treasury_) Ownable(msg.sender) {
+        if (nexusToken_ == address(0)) revert ZeroNexusToken();
+        _tcgv = IERC20(tcgv_);
+        _usdc = IERC20(usdc_);
+        _founderNFT = ITCGVaultFounderNFT(founderNFT_);
+        _nexusToken = ITCGNexusToken(nexusToken_);
+        _treasury = treasury_ != address(0) ? treasury_ : msg.sender;
+        emit TreasuryUpdated(_treasury);
+    }
 
     // External getters (private/external pattern)
     function tcgv() external view returns (address) { return address(_tcgv); }
@@ -70,22 +102,6 @@ contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
     function allocations(address user) external view returns (uint256 tcgvAllocated, uint256 tcgvClaimed) {
         UserAllocation storage u = _allocations[user];
         return (u.tcgvAllocated, u.tcgvClaimed);
-    }
-
-    event Bought(address user, uint256 usdcAmount, uint256 tcgvAllocated, uint256 orderId, uint256 purchasedAt);
-    event Claimed(address user, uint256 amount);
-    event PresaleOrderCancelled(address user, uint256 orderId, uint256 usdcRefundDue, uint256 tcgvBurned, uint256 nexusClawedBack);
-    event Finalized(uint256 tgeTimestamp);
-    event TreasuryUpdated(address treasury);
-
-    constructor(address tcgv_, address usdc_, address founderNFT_, address nexusToken_, address treasury_) Ownable(msg.sender) {
-        if (nexusToken_ == address(0)) revert ZeroNexusToken();
-        _tcgv = IERC20(tcgv_);
-        _usdc = IERC20(usdc_);
-        _founderNFT = ITCGVaultFounderNFT(founderNFT_);
-        _nexusToken = ITCGNexusToken(nexusToken_);
-        _treasury = treasury_ != address(0) ? treasury_ : msg.sender;
-        emit TreasuryUpdated(_treasury);
     }
 
     function setTreasury(address treasury_) external onlyOwner {
@@ -212,19 +228,4 @@ contract TCGVaultInitialLaunch is Ownable2Step, ReentrancyGuard {
         _tcgv.transfer(msg.sender, amount);
         emit Claimed(msg.sender, amount);
     }
-
-    error ZeroNexusToken();
-    error PresaleEnded();
-    error PresaleCountdownEnded();
-    error PresaleNotEnded();
-    error ZeroAmount();
-    error ExceedsHardCap();
-    error ExceedsWalletCap();
-    error AlreadyFinalized();
-    error NotFinalized();
-    error NothingToClaim();
-    error InvalidOrder();
-    error OrderAlreadyCancelled();
-    error Unauthorized();
-    error CancellationWindowEnded();
 }

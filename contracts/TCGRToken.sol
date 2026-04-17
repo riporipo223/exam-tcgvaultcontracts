@@ -13,15 +13,6 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
  *      L'owner peut bannir un parrain ou un filleul du programme (fraude) : plus de récompenses TCGR pour ces achats.
  */
 contract TCGRToken is ERC20, Ownable2Step {
-    error OnlyMinter();
-    error OnlyConverter();
-    error ZeroAddress();
-    error ZeroAmount();
-    error SoulboundTransferNotAllowed();
-    error InsufficientBalance();
-    error ReferrerAlreadySet();
-    error SelfReferralNotAllowed();
-
     /// @notice 0.5% of USDC (6 decimals) value minted as TCGR (18 decimals) per validated buy.
     uint256 public constant REFERRAL_BP = 50;
 
@@ -40,6 +31,15 @@ contract TCGRToken is ERC20, Ownable2Step {
     event Converted(address account, uint256 amount);
     event MinterUpdated(address minter);
     event ConverterUpdated(address converter);
+
+    error OnlyMinter();
+    error OnlyConverter();
+    error ZeroAddress();
+    error ZeroAmount();
+    error SoulboundTransferNotAllowed();
+    error InsufficientBalance();
+    error ReferrerAlreadySet();
+    error SelfReferralNotAllowed();
 
     constructor(address minter_) ERC20("TCG-Referral", "TCGR") Ownable(msg.sender) {
         if (minter_ == address(0)) revert ZeroAddress();
