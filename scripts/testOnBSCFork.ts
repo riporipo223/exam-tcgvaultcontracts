@@ -66,15 +66,12 @@ const COMPARE_BUY_USDC = 1_000n * USDC_6;
 // Same TCGV amount for both sell routes.
 const COMPARE_SELL_TCGV = parseEther("10000");
 
-// Tokenomics — used for assertions / logs
-const BUY_TAX_BP = 600; // 6% (Pancake direct: token buy tax on TCGV)
-const BUY_VAULT_BP = 300; // 3% of USDC in (BuyRouter path)
+// Tokenomics — logs / loose checks (routeur ON = BuyRouter USDC; routeur OFF = pool TCGV)
+const BUY_VAULT_BP = 300; // 3% of USDC in (BuyRouter / routeur ON)
 const BUY_MARKETING_BP = 200; // 2% of USDC in (structure)
-const CASHBACK_BP_PRESALE = 3000; // 30% NEXUS during presale (whitepaper §6)
-const SELL_TAX_BP = 500; // 5% (Pancake direct / pool)
-const SELL_VAULT_BP = 200; // 2% of notional (pool: 40% of 5% fee to vault)
-const SELL_AUTOLP_BP = 200; // 2% of notional (pool autolp)
-const SELL_VAULT_PLUS_AUTOLP_BP = SELL_VAULT_BP + SELL_AUTOLP_BP; // vault + autolp TCGV fee (pool path)
+const CASHBACK_BP_PRESALE = 3000; // 30% NEXUS during presale (portail / recordBuyAndMintCashback)
+// Pool path (routeur OFF): 5% sell → 2% vault + 2% autolp of notional (40% + 40% of fee)
+const POOL_SELL_VAULT_PLUS_AUTOLP_BP = 400;
 
 async function main() {
   const { viem, networkHelpers } = await hre.network.connect();
@@ -641,7 +638,7 @@ async function main() {
   const supplyBefore4 = (await token.read.totalSupply());
   const traderUsdcBefore4 = await usdc.read.balanceOf([trader.account.address]);
 
-  // Pool sell tax 5% (2% vault, 2% LP, 1% marketing; no burn).
+  // Pool sell tax 5% routeur OFF (2% vault, 2% autolp, 1% marketing; no burn).
   // For this script we sell TCGV → USDC on Pancake (no BNB).
   const sellPath = [tokenAddress, BSC_USDC];
   // Preflight to get an actionable revert reason (stdout-friendly even when redirecting output to a file).
@@ -756,7 +753,7 @@ async function main() {
       throw new Error(`4.2 Sell burn: expected 0 TCGV burn on router sell, got ${formatEther(burn5)}`);
     }
     const vaultBp = Number((vaultDelta5 * 10000n) / sold2);
-    if (vaultDelta5 > 0n && (vaultBp < SELL_VAULT_PLUS_AUTOLP_BP - 200 || vaultBp > SELL_VAULT_PLUS_AUTOLP_BP + 500)) {
+    if (vaultDelta5 > 0n && (vaultBp < POOL_SELL_VAULT_PLUS_AUTOLP_BP - 200 || vaultBp > POOL_SELL_VAULT_PLUS_AUTOLP_BP + 500)) {
       console.log(`    [Note] 4.2 Vault TCGV delta: ${vaultBp}bp (router pays fees in USDC)`);
     }
   }
@@ -795,10 +792,10 @@ async function main() {
   console.log("Community (TCGV):        ", communityAddr);
   console.log();
   console.log("Tokenomics verified:");
-  console.log("  Buy (Pancake direct): 6% TCGV (vault/marketing/autolp) + NEXUS cashback — no fee burn");
-  console.log("  Buy (BuyRouter):      5% USDC (3% vault, 2% structure) + NEXUS cashback — no TCGV burn");
-  console.log("  Sell (Pancake direct): 5% TCGV (2% vault, 2% autolp, 1% marketing) — no fee burn");
-  console.log("  Sell (BuyRouter):     4% on USDC out (1.5% vault, 1% LP, 1% community, 0.5% structure)");
+  console.log("  Buy (Pancake direct): 6% TCGV routeur OFF (~2% vault, ~2% structure, ~2% autolp); no NEXUS on pair — no fee burn");
+  console.log("  Buy (BuyRouter):      5% USDC routeur ON (3% vault, 2% structure) + NEXUS cashback — no TCGV burn");
+  console.log("  Sell (Pancake direct): 5% TCGV routeur OFF (2% vault, 2% autolp, 1% structure) — no fee burn");
+  console.log("  Sell (BuyRouter):     4% USDC routeur ON (1.5% vault, 1% LP, 1% community, 0.5% structure)");
   console.log();
   console.log("Flow: Deploy → TCGV/USDC pair & liquidity → Buy 4 routes (all USDC in) → Sell 2 routes (TCGV→USDC).");
   console.log("All steps completed successfully.");

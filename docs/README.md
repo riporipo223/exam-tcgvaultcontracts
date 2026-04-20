@@ -7,7 +7,7 @@ This directory contains the ERC20 token contracts for the TCG Vault ecosystem an
 | File | Purpose |
 |------|---------|
 | [**README.md**](README.md) (this file) | Contract overview, deployment order, operational notes, events, admin entrypoints summary. |
-| [**FEE_REFERENCE.md**](FEE_REFERENCE.md) | Fee defaults, formulas, mutability, and roles (direct pool vs USDC router). |
+| [**FEE_REFERENCE.md**](FEE_REFERENCE.md) | Frais : routeur OFF (paire / `TCGVaultToken`) vs routeur ON (USDC / `TCGVaultBuyRouter`). |
 | [**PRODUCT_LIFECYCLE.md**](PRODUCT_LIFECYCLE.md) | Product phases as implemented (Founder NFT, Initial Launch, trading, staking). |
 | [**IMPLEMENTATION_NOTES_FR.md**](IMPLEMENTATION_NOTES_FR.md) | French: same implementation facts (fees, presale, NFTs). |
 | [**WALLET_ADDRESSES.md**](WALLET_ADDRESSES.md) | `.env` variable ↔ wallet role mapping for deploy scripts. |
@@ -20,22 +20,22 @@ This directory contains the ERC20 token contracts for the TCG Vault ecosystem an
 Token A — economic engine. BNB Chain, 1 milliard supply (fixed in contract).
 
 **Features:**
-- **Direct pair (PancakeSwap / V2 pool):** Buy tax **6%** in TCGV (`BUY_TAX = 600`): **⅓** vault, **⅓** marketing, **⅓** `pendingAutolp` (liquidity accrual). No TCGV burn on that fee. NEXUS cashback **30%** of buy amount while presale is active, **10%** after (`TCGVaultToken` presale flag).
-- **Direct pair sell:** **5%** in TCGV (`SELL_TAX = 500`), split **40%** vault, **40%** autolp (`pendingAutolp`), **20%** marketing, **0%** community — relative to the fee slice (i.e. **2% / 2% / 1%** of notional). No supply burn on sell fee distribution.
-- **`pendingAutolp` / `executePendingAutolp`:** Part of buy/sell fees accrues for liquidity operations; this is not a supply burn.
+- **Direct pair (routeur OFF):** Buy **6%** TCGV (`BUY_TAX = 600`), fee split in thirds → vault / marketing / `pendingAutolp` (**~2% + 2% + 2%** notional). Sell **5%** (`SELL_TAX = 500`), split **40% / 40% / 20%** of the fee → vault / autolp / marketing (**2% + 2% + 1%** notional; community **0%** by default). No TCGV burn on fee distribution. **No $TCGNEXUS** on pair buys — cashback **only** via `recordBuyAndMintCashback` when using **`TCGVaultBuyRouter`** (routeur ON).
+- **`pendingAutolp` / `executePendingAutolp`:** liquidity accrual from fee legs; not a supply burn.
 
 ### TCGNexusToken.sol (NEXUS)
 Soulbound governance / membership token.
 
 **Features:**
 - Soulbound (non transférable): no transfers between accounts; mint and burn only
-- Minter = TCGVaultToken only, set at deployment (immutable)
-- Obtained via cashback on TCGV purchase; owner can mint for presale/initial distribution
+- Cashback minter = `TCGVaultToken`, set at deployment (immutable)
+- Presale bonus mint/burn access = immutable `FounderNFT` + `InitialLaunch` addresses only
+- No generic owner mint path
 
 ### TCGVaultBuyRouter.sol
-**Buy TCGV with USDC** (stablecoin path). Default **5%** of USDC in prior to swap (**300** + **200** + **0** bps → vault / marketing / community); remaining USDC is swapped; **100%** of TCGV out goes to the buyer (no TCGV burn). NEXUS cashback uses `TCGVaultToken` rules (30% / 10% of **TCGV** buy amount). Transient storage avoids double-taxing the router leg on `TCGVaultToken`.
+**Routeur ON (portail USDC).** Default **5%** of USDC in (**300** + **200** + **0** bps → vault / marketing / community); remainder swapped; **100%** of TCGV out to the buyer (no TCGV burn). $TCGNEXUS via `recordBuyAndMintCashback` (30% / 10% of **TCGV** received). Transient storage avoids double-taxing on `TCGVaultToken`.
 
-**Sell (`sellTCGVForUSDC`):** default **4%** of **USDC received** (`sellTaxBp = 400`), split **3750 / 2500 / 1250 / 2500** bps of the fee amount → vault / autolp / marketing / community (**1.5% / 1% / 0.5% / 1%** of USDC notional). No TCGV burn on input; router is fee-excluded on the token.
+**Sell (`sellTCGVForUSDC`):** default **4%** of USDC out (`sellTaxBp = 400`), split **3750 / 2500 / 1250 / 2500** → **1.5% / 1% / 0.5% / 1%** notional. Router is fee-excluded on the token.
 
 Full tables, getters, and caps: [**FEE_REFERENCE.md**](FEE_REFERENCE.md).
 
@@ -58,11 +58,13 @@ NEXUS is **immutable** on `TCGVaultToken` (constructor arg). `TCGNexusToken` nee
 2. **Deploy TCGVaultToken** with `nexusToken = address(nexusToken)` (must match the address from step 1). Name, symbol and supply are fixed in the contract.
    ```solidity
    TCGVaultToken token = new TCGVaultToken(
+       stakingVaultAddress,
        dexRouterAddress,
        vaultAddress,
        marketingAddress,
        communityAddress,
-       address(nexusToken)
+       address(nexusToken),
+       initialLaunchAddress
    );
    ```
 
@@ -95,9 +97,9 @@ Script: `yarn deploy:bsctest` → `scripts/deployBscTestnet.ts` on Hardhat netwo
 
 Authoritative detail: [**FEE_REFERENCE.md**](FEE_REFERENCE.md).
 
-**`TCGVaultToken` (direct pool):** default buy **6%** (`BUY_TAX = 600`) with shares **3333 / 3333 / 3334**; default sell **5%** (`SELL_TAX = 500`) with shares **4000 / 4000 / 2000 / 0**. No fee-driven supply burn on these paths. **`ADMIN_ROLE`** may update params via `setBuyFeeParams` / `setSellFeeParams` (shares sum to **10_000**; token caps are **`MAX_BUY_TAX_BP = 600`** and **`MAX_SELL_TAX_BP = 500`**, monotonic non-increasing).
+**`TCGVaultToken` (routeur OFF / paire):** default buy **6%** (`BUY_TAX = 600`), shares **3333 / 3333 / 3334**; default sell **5%** (`SELL_TAX = 500`), shares **4000 / 4000 / 2000 / 0**. Caps **`MAX_BUY_TAX_BP = 600`**, **`MAX_SELL_TAX_BP = 500`**. **`ADMIN_ROLE`**, shares sum **10_000**, monotonic tax.
 
-**`TCGVaultBuyRouter` (USDC):** default buy fee **5%** of USDC in (**300** + **200** + **0** bps); default sell **4%** of USDC out with share split **3750 / 2500 / 1250 / 2500** on the fee. No TCGV burn on router buy. Owner may call `setBuyFeeParams` / `setSellFeeParams` subject to router caps (**`MAX_BUY_TOTAL_BP = 500`**, **`MAX_SELL_TAX_BP = 400`**, monotonic non-increasing).
+**`TCGVaultBuyRouter` (routeur ON / USDC):** default **5%** USDC in (**300** + **200** + **0** bps); default sell **4%** USDC out, split **3750 / 2500 / 1250 / 2500**. Caps **`MAX_BUY_TOTAL_BP = 500`**, **`MAX_SELL_TAX_BP = 400`**. **`onlyOwner`**, monotonic.
 
 ## Important Notes
 
@@ -105,7 +107,7 @@ Authoritative detail: [**FEE_REFERENCE.md**](FEE_REFERENCE.md).
 
 2. **DEX routers:** The constructor registers one V2-style router (`dexFactoryForRouter[router] = router.factory()`). Add or remove more with `setDexRouter(router, active)` (emits `DexRouterUpdated`). Registered routers are fee-excluded. Taxed swaps are still driven by `isPair`, not by this mapping.
 
-3. **Cashback:** NEXUS cashback on **buys** only (30% presale / 10% after finalize — see `TCGVaultToken`). NEXUS is soulbound. `TCGNexusToken`’s minter is set at deployment to `TCGVaultToken` and is immutable (no setter).
+3. **Cashback:** NEXUS cashback on **buys** via **`recordBuyAndMintCashback`** (portail / routeur USDC): **30%** presale / **10%** after finalize. Achats **directs depuis la paire** ne mintent pas de NEXUS. NEXUS est soulbound. `TCGNexusToken`’s minter is set at deployment to `TCGVaultToken` and is immutable (no setter).
 
 4. **Autolp:** Portions of buy/sell fees increase `pendingAutolp`; operators call `executePendingAutolp` when adding liquidity (see token NatSpec). This accrual is not a circulating-supply burn.
 
@@ -119,7 +121,7 @@ Authoritative detail: [**FEE_REFERENCE.md**](FEE_REFERENCE.md).
 
 - The token uses `ReentrancyGuard` for sell operations; the buy router uses transient reentrancy protection.
 - **`ADMIN_ROLE`** can toggle fees via `setFeesEnabled`; pause / unpause use **`PAUSER_ROLE`** / **`UNPAUSER_ROLE`**; blacklist uses **`BLACKLISTER_ROLE`**. **`DEFAULT_ADMIN_ROLE`** is intended for granting/revoking those roles only (deployer holds all roles at construction).
-- Fee **rates and splits** are **governable** within contract-specific caps (`TCGVaultToken`: 600/500; `TCGVaultBuyRouter`: 500/400) and monotonic non-increasing tax setters. Read on-chain values when integrating.
+- Fee **rates and splits** are **governable** within caps (`TCGVaultToken` paire: **600/500**; `TCGVaultBuyRouter`: **500/400**) and monotonic tax setters. Read on-chain values when integrating.
 - Emergency patterns (pause, blacklist) are documented in the Solidity files.
 
 ## Functions
@@ -135,10 +137,9 @@ Authoritative detail: [**FEE_REFERENCE.md**](FEE_REFERENCE.md).
 - `setFeesEnabled(bool)` — Enable/disable fees
 - `setCashbackEnabled(bool)` — Enable/disable cashback
 - `setMinAmounts(uint256, uint256)` — Set minimum buy/sell amounts for fee computation
-- `setBuyFeeParams` / `setSellFeeParams` — Update direct pool tax bps and recipient splits (shares sum to 10_000; tax is bounded by `MAX_BUY_TAX_BP` / `MAX_SELL_TAX_BP` and cannot increase)
+- `setBuyFeeParams` / `setSellFeeParams` — Update **paire** (routeur OFF) tax bps and splits (shares sum to 10_000; tax ≤ `MAX_BUY_TAX_BP` / `MAX_SELL_TAX_BP`, monotonic)
 - `setAllocationRecipients` — Liquidity / team / ops recipients required before supply recompute
 - `setBuyRouter` — Wire `TCGVaultBuyRouter` (zero address clears)
-- `setStakingVault` — Optional `TCGVaultStakingVault`; when set, `setBlacklisted(..., true)` redeems that account’s sTCGV to `vaultAddress` before seizing wallet TCGV
 
 ### `PAUSER_ROLE` / `UNPAUSER_ROLE`
 - `pause` / `unpause` respectively.

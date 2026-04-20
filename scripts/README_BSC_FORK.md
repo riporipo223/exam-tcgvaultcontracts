@@ -49,11 +49,11 @@ npx hardhat run scripts/testOnBSCFork.ts --network hardhat
    - Adds TCGV + USDC via the liquidity wrapper (no fees)
 
 4. **Tests Trading Scenarios:**
-   - **Buy via PancakeSwap Router:** USDC -> TCGV with token-side buy fees
-   - **Buy via TCGVaultBuyRouter:** USDC fee path (5% USDC fee = 3% vault + 2% marketing, then swap to TCGV; no TCGV burn)
-   - **Direct Pair Swap:** Non-router path (direct pair interaction)
-   - **Sell via PancakeSwap Router:** Sell TCGV for USDC with token-side sell fees
-   - **Sell via TCGVaultBuyRouter:** TCGV -> USDC with 4% USDC fee split (vault + marketing)
+   - **Buy via PancakeSwap Router:** USDC → TCGV with **routeur OFF** token buy tax (**6%** TCGV, thirds vault/marketing/autolp; no NEXUS on pair)
+   - **Buy via TCGVaultBuyRouter:** **Routeur ON** — **5%** USDC (3% vault + 2% marketing), swap, NEXUS cashback via token; no TCGV burn on fee
+   - **Direct Pair Swap:** Same pool path as above without the official router
+   - **Sell via PancakeSwap Router:** **5%** TCGV sell tax on pool path (routeur OFF)
+   - **Sell via TCGVaultBuyRouter:** **4%** fee on USDC out (routeur ON)
 
 ## Expected Output
 

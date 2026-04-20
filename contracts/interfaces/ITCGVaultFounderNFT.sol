@@ -2,12 +2,16 @@
 pragma solidity 0.8.27;
 
 interface ITCGVaultFounderNFT {
-    /// @notice Return total Founder NFTs sold (paid mints).
-    /// @return Number of Founder NFTs minted/sold so far.
+    /// @notice Active paid Founder mints (non-cancelled); excludes strategic reserve.
     function soldCount() external view returns (uint256);
 
-    /// @notice Return effective wave-2 start timestamp (time-based default, accelerated on wave-1 sellout).
-    /// @return UNIX timestamp for wave 2 start.
+    /// @notice Strategic reserve NFTs minted (max 10).
+    function strategicReserveMinted() external view returns (uint256);
+
+    /// @notice Effective wave-2 start timestamp (time-based default, accelerated on wave-1 sellout).
     function wave2StartTimestamp() external view returns (uint256);
+
+    /// @notice Owner-only: mint one strategic reserve NFT (no USDC / no NEXUS).
+    function mintStrategicReserve(address to) external;
 }
 

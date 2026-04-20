@@ -42,8 +42,14 @@ error NoFeesToClaim();
  * @title TCGVaultToken (TCGV)
  * @notice Token A — le Moteur économique (whitepaper §4). BNB Chain, 1 milliard supply.
  * @dev Initial allocation (whitepaper §5): 60% Presale, 20% Liquidité, 4% Team (12mo cliff + 24mo vesting), 16% Ops (5% immediate + 11% over 36mo vesting).
- * @dev Taxe achat (pool / DEX direct — pas le routeur USDC dédié): 6% TCGV: 2% vault, 2% marketing, 2% liquidité (pendingAutolp). Pas de burn sur les frais.
- * @dev Taxe vente (pool): 5% TCGV: 2% vault, 1% marketing, 2% autolp. Cashback NEXUS: 30% prévente, 10% standard (whitepaper §6).
+ *
+ * @dev **Routeur ON (portail / USDC)** — implémenté par `TCGVaultBuyRouter`, pas par les taxes paire ci-dessous : achat **5%** USDC (**3%** coffre / vault, **2%** structure),
+ *      vente **4%** sur l’USDC (**1,5%** vault, **1%** liquidité, **1%** récompenses communautaires, **0,5%** structure). Le routeur est exclu des frais sur ce token pour éviter la double taxation.
+ *      Cashback **$TCGNEXUS** : **30%** du montant TCGV acheté tant que `presaleActive`, puis **10%** — uniquement via `recordBuyAndMintCashback` appelé par le buy router (pas sur un swap paire direct).
+ *
+ * @dev **Routeur OFF (DEX / paire directe)** — taxes en **$TCGV** sur les transferts swap via `isPair` : achat **6%** (tiers du fee ≈ **2%** vault, **2%** structure & marketing, **2%** liquidité → `pendingAutolp`),
+ *      vente **5%** du fee (**40% / 40% / 20%** du montant de taxe → **2%** vault, **2%** liquidité, **1%** structure & marketing ; poche communauté **0%** par défaut). **Aucune** attribution $TCGNEXUS sur l’achat paire (`_handleBuy`).
+ *
  * @dev Access control: {DEFAULT_ADMIN_ROLE} is for granting/revoking roles only. Routine config uses {ADMIN_ROLE}.
  *      {PAUSER_ROLE} / {UNPAUSER_ROLE} split emergency stop vs resume. {BLACKLISTER_ROLE} manages blacklist.
  *      Deployer receives all roles at construction; governance can revoke narrow roles from hot wallets.
@@ -62,9 +68,9 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     uint256 public constant MAX_BUY_TAX_BP = 600;
     /// @notice Absolute cap for direct-pool sell tax (5%, deployment default).
     uint256 public constant MAX_SELL_TAX_BP = 500;
-    // Fee parameters (basis points, 10000 = 100%) — pool defaults; owner-modifiable
-    uint256 public BUY_TAX = 600; // 6% (direct pool / DEX path)
-    uint256 public SELL_TAX = 500; // 5% (direct pool / DEX path)
+    // Fee parameters (basis points, 10000 = 100%) — routeur OFF (paire); owner-modifiable within MAX_* caps
+    uint256 public BUY_TAX = 600; // 6% — swap direct via paire (`isPair`)
+    uint256 public SELL_TAX = 500; // 5% — idem
     /// @notice Standard-period cashback in NEXUS (after presale). Whitepaper §6: 10% — immutable.
     uint256 private constant CASHBACK_RATE = 1000; // 10%
     /// @notice Presale cashback (Vagues 1 et 2). Whitepaper §6: BONUS PIONNIER 30% — immutable.
@@ -74,15 +80,15 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     /// @notice When true, cashback uses 30%; when false (after presale finalize), uses 10%. Only set when `initialLaunch` calls finalizePresaleAndRecompute().
     bool public presaleActive = true;
 
-    // Buy tax distribution (basis points of buy feeAmount; sum 10000)
-    uint256 public BUY_VAULT_SHARE = 3333; // 1/3 of fee → vault
-    uint256 public BUY_MARKETING_SHARE = 3333; // 1/3 of fee → marketing
-    uint256 public BUY_AUTOLP_SHARE = 3334; // 1/3 of fee → pendingAutolp (liquidité)
+    // Buy fee split (bps of fee amount; sum 10000) — routeur OFF: ≈2% + 2% + 2% notional on 6% fee
+    uint256 public BUY_VAULT_SHARE = 3333;
+    uint256 public BUY_MARKETING_SHARE = 3333;
+    uint256 public BUY_AUTOLP_SHARE = 3334;
 
-    // Sell tax distribution (basis points of sell feeAmount; sum 10000)
-    uint256 public SELL_VAULT_SHARE = 4000; // 2% of notional (40% of 5% fee)
-    uint256 public SELL_AUTOLP_SHARE = 4000; // 2% of notional
-    uint256 public SELL_MARKETING_SHARE = 2000; // 1% of notional
+    // Sell fee split (bps of fee amount; sum 10000) — routeur OFF: 2% + 2% + 1% notional on 5% fee
+    uint256 public SELL_VAULT_SHARE = 4000;
+    uint256 public SELL_AUTOLP_SHARE = 4000;
+    uint256 public SELL_MARKETING_SHARE = 2000;
     uint256 public SELL_COMMUNITY_SHARE = 0;
     
     /// @notice Registered Uniswap V2–style DEX routers for metadata / integrations; `factory == address(0)` means not registered.
@@ -90,9 +96,9 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     address public vaultAddress;
     address public marketingAddress;
     address public communityAddress;
-    /// @notice TCG-NEXUS for cashback (immutable; set once in constructor).
+    /// @notice $TCGNEXUS mint target for cashback (immutable). Minted only from `recordBuyAndMintCashback` (routeur ON / portail).
     address private immutable _nexusToken;
-    /// @notice Optional USDC-path buy router integration; only this address can call `recordBuyAndMintCashback`.
+    /// @notice `TCGVaultBuyRouter` (routeur ON / USDC). Sole caller of `recordBuyAndMintCashback`; fee-excluded on this token.
     address public buyRouter;
     /// @notice Optional `TCGVaultStakingVault` over this token; when blacklisting, staked shares are redeemed to `vaultAddress` first.
     address public immutable stakingVault;
@@ -243,7 +249,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         // No initial mint. Supply is minted during presale (mintPresale by launch contract) and at presale end (finalizePresaleAndRecompute mints 20% liquidity, 4% team vesting, 5% ops direct, 11% ops vesting — whitepaper §5).
     }
 
-    /// @notice NEXUS token used for buy cashback (same address for the life of the contract).
+    /// @notice $TCGNEXUS address (immutable). Cashback only on routeur ON path via `recordBuyAndMintCashback`.
     function nexusToken() external view returns (address) {
         return _nexusToken;
     }
@@ -372,7 +378,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     }
 
     /**
-     * @notice Update buy fee parameters (pool mode).
+     * @notice Update buy fee parameters (routeur OFF / paire uniquement).
      * @dev Shares are basis points of the buy feeAmount and must sum to 10000.
      */
     function setBuyFeeParams(
@@ -392,7 +398,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     }
 
     /**
-     * @notice Update sell fee parameters (pool mode).
+     * @notice Update sell fee parameters (routeur OFF / paire uniquement).
      * @dev Shares are basis points of the sell feeAmount and must sum to 10000.
      */
     function setSellFeeParams(
@@ -571,7 +577,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     }
 
     /**
-     * @notice Set the buy router used for USDC-path buy/sell flow. Only this address can call `recordBuyAndMintCashback`.
+     * @notice Set `TCGVaultBuyRouter` (routeur ON / portail USDC). Only this address can call `recordBuyAndMintCashback`.
      */
     function setBuyRouter(address _buyRouter) external onlyRole(ADMIN_ROLE) {
         address previous = buyRouter;
@@ -588,7 +594,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
     }
 
     /**
-     * @notice Called by buy router after swapping USDC -> TCGV: mints NEXUS cashback to recipient (30% presale, 10% standard). Only callable by `buyRouter`.
+     * @notice Routeur ON only: after USDC→TCGV via buy router, mints $TCGNEXUS cashback (30% presale / 10% standard of `tcgvAmount`). Only `buyRouter`.
      */
     function recordBuyAndMintCashback(address recipient, uint256 tcgvAmount) external {
         if (msg.sender != buyRouter) revert OnlyBuyRouter();
@@ -653,7 +659,7 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         // Pair sends full amount to buyer; then buyer pays fees to vault/marketing/autolp.
         super._update(from, to, amount);
         if (feeAmount > 0) _distributeBuyFeesFrom(to, feeAmount);
-        _distributeCashback(to, amount);
+        // Routeur OFF: no $TCGNEXUS on pair buy (routeur ON mints via `recordBuyAndMintCashback`).
     }
 
     /**
@@ -697,18 +703,6 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         if (marketingAmount > 0) pendingFeeClaims[marketingAddress] += marketingAmount;
         if (communityAmount > 0) pendingFeeClaims[communityAddress] += communityAmount;
         emit FeesDistributed(vaultAmount, marketingAmount, communityAmount, 0, autolpAmount);
-    }
-
-    /**
-     * @notice Distribute cashback in TCGNexus tokens (30% presale, 10% standard). Reverts if mint fails.
-     */
-    function _distributeCashback(address recipient, uint256 purchaseAmount) private {
-        if (!cashbackEnabled) return;
-        uint256 cashbackAmount = (purchaseAmount * getCashbackRate()) / 10000;
-        if (cashbackAmount == 0) return;
-
-        ITCGNexusToken(_nexusToken).mintCashback(recipient, cashbackAmount);
-        emit CashbackDistributed(recipient, cashbackAmount);
     }
 
     /**

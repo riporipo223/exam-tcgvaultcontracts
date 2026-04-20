@@ -2,9 +2,9 @@
 
 Smart contracts for the TCG Vault ecosystem on BNB Chain.
 
-## Documentation Status
+## Documentation
 
-This README describes the **current on-chain implementation** in this repository.
+This README describes the **on-chain implementation** in this repository.
 The Solidity source of truth is:
 
 - `contracts/TCGVaultToken.sol`
@@ -12,21 +12,23 @@ The Solidity source of truth is:
 
 ## Current Fee Model (Implemented)
 
-### 1) Direct DEX/Pool Transfers (`TCGVaultToken`)
+Two modes: **routeur OFF** = taxes paire sur `TCGVaultToken` (TCGV) ; **routeur ON** = portail USDC sur `TCGVaultBuyRouter` (sans double taxation sur le token).
 
-- **Buy tax:** `BUY_TAX = 600` (6%).
-- **Buy split (of fee amount):**
-  - Vault: `BUY_VAULT_SHARE = 3333` (~33.33% of fee, ~2.00% notional)
-  - Marketing: `BUY_MARKETING_SHARE = 3333` (~33.33% of fee, ~2.00% notional)
-  - Auto-LP bucket: `BUY_AUTOLP_SHARE = 3334` (~33.34% of fee, ~2.00% notional)
-- **Sell tax:** `SELL_TAX = 500` (5%).
+### 1) Direct DEX/Pool — `TCGVaultToken` (routeur OFF)
+
+- **Buy tax:** `BUY_TAX = 600` (**6%** TCGV sur achat via paire).
+- **Buy split (of fee amount, thirds):**
+  - Vault: `BUY_VAULT_SHARE = 3333` (~**2%** notional)
+  - Marketing: `BUY_MARKETING_SHARE = 3333` (~**2%** notional)
+  - Auto-LP bucket: `BUY_AUTOLP_SHARE = 3334` (~**2%** notional → `pendingAutolp`)
+- **Sell tax:** `SELL_TAX = 500` (**5%**).
 - **Sell split (of fee amount):**
-  - Vault: `SELL_VAULT_SHARE = 4000` (40% of fee, 2.00% notional)
-  - Auto-LP bucket: `SELL_AUTOLP_SHARE = 4000` (40% of fee, 2.00% notional)
-  - Marketing: `SELL_MARKETING_SHARE = 2000` (20% of fee, 1.00% notional)
-  - Community: `SELL_COMMUNITY_SHARE = 0`
+  - Vault: `SELL_VAULT_SHARE = 4000` (40% of fee → **2%** notional)
+  - Auto-LP bucket: `SELL_AUTOLP_SHARE = 4000` (40% of fee → **2%** notional)
+  - Marketing: `SELL_MARKETING_SHARE = 2000` (20% of fee → **1%** notional)
+  - Community: `SELL_COMMUNITY_SHARE = 0` (default **0%**)
 
-### 2) USDC Router Path (`TCGVaultBuyRouter`)
+### 2) USDC Router Path — `TCGVaultBuyRouter` (routeur ON)
 
 - **Buy (USDC -> TCGV):**
   - Fee is taken in USDC before swap.
@@ -48,7 +50,7 @@ The Solidity source of truth is:
 
 ## Burn Behavior
 
-- There is **no buy/sell burn fee mechanism** in the current transfer tax or router tax flows.
+- There is **no buy/sell burn fee mechanism** in the transfer tax or router tax flows.
 - Buy/sell fees are routed to pending claim balances and/or `pendingAutolp`, not burned.
 - The only burn-related path in `TCGVaultToken` is `burnPresaleAllocation(...)`, gated to `initialLaunch`.
 
@@ -65,8 +67,8 @@ Fees are **not immutable constants**. They are configurable by privileged roles,
 
 Absolute caps:
 
-- `TCGVaultToken`: `MAX_BUY_TAX_BP = 600` (6%) and `MAX_SELL_TAX_BP = 500` (5%).
-- `TCGVaultBuyRouter`: `MAX_BUY_TOTAL_BP = 500` (5%) and `MAX_SELL_TAX_BP = 400` (4%).
+- `TCGVaultToken` (paire): `MAX_BUY_TAX_BP = 600` (6%) and `MAX_SELL_TAX_BP = 500` (5%) — deployment defaults for routeur OFF.
+- `TCGVaultBuyRouter` (portail): `MAX_BUY_TOTAL_BP = 500` (5%) and `MAX_SELL_TAX_BP = 400` (4%) — routeur ON.
 
 Constraints:
 
@@ -77,6 +79,6 @@ Constraints:
 
 ## Notes
 
-- NEXUS cashback logic is active in token/router flows as implemented in code.
+- NEXUS cashback on buys is minted via the **USDC portail** (`recordBuyAndMintCashback`); direct **pair** buys do not mint NEXUS (see `docs/FEE_REFERENCE.md`).
 - If you use these contracts for calculators, analytics, or simulations, read fee values directly from contract state where possible rather than assuming static values.
 - Founder sale and initial presale custody/refund model (direct USDC transfer to regulated recipient, event-driven cooling-off refunds) is documented in `docs/PRODUCT_LIFECYCLE.md` and `docs/WALLET_ADDRESSES.md`.

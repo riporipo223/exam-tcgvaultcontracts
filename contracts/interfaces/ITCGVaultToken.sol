@@ -35,7 +35,7 @@ interface ITCGVaultToken {
     /// @return True on successful approval.
     function approve(address spender, uint256 amount) external returns (bool);
 
-    /// @notice Record a validated buy and mint NEXUS cashback to recipient.
+    /// @notice Routeur ON only: mint $TCGNEXUS cashback to `recipient` (base = `tcgvAmount`). Only callable by the configured buy router.
     /// @param recipient Address that receives cashback mint.
     /// @param tcgvAmount Bought TCGV amount used as cashback base.
     function recordBuyAndMintCashback(address recipient, uint256 tcgvAmount) external;

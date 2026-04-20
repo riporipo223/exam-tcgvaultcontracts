@@ -11,10 +11,9 @@ import {ITCGNexusToken} from "./interfaces/ITCGNexusToken.sol";
 
 /**
  * @title TCGVaultFounderNFT
- * @notice Founder Edition — 500 exemplaires vendus (whitepaper §7). Vague 1: 200 USDC (up to 250 NFTs) pendant 7 jours,
- *   puis vague 2: 350 USDC (remaining supply), avec bascule anticipée si la vague 1 est sold out.
- *   Bonus: 30 % du montant en $TCGNEXUS à chaque achat.
- *   USDC per mint: 30 % acquisitions physiques Vault, 60 % liquidité projet, 10 % opérations / écosystème (whitepaper; reste après arrondi).
+ * @notice Founder Edition — 500 exemplaires (whitepaper §7 / C.9): 245 + 245 ventes payantes (200 / 350 USDC)
+ *   + 10 réserve stratégique (mint owner, sans USDC ni bonus NEXUS). Vague 1: 7 jours puis vague 2, ou bascule anticipée si 245 vendus.
+ *   Bonus: 30 % du montant en $TCGNEXUS sur chaque achat payant uniquement.
  *
  * @dev Uses classic ReentrancyGuard so Anvil/other forks work with a plain --fork-url (no --hardfork cancun required).
  */
@@ -24,29 +23,30 @@ contract TCGVaultFounderNFT is ERC721, Ownable2Step, ReentrancyGuard {
     IERC20 private immutable _usdc;
     ITCGNexusToken private immutable _nexusToken;
 
-    /// @notice Wave 1 target size: 250 NFTs at 200 USDC (5 reserved operationally for owner purchase at same price).
-    uint256 public constant WAVE1_SIZE = 250;
-    /// @notice Wave 2 remaining supply priced at 350 USDC (5 owner mints max in wave 2).
-    uint256 public constant WAVE2_SIZE = 250;
-    /// @notice Total sold supply across both waves (no separate community mints): 500 Founder NFTs.
-    uint256 public constant TOTAL_SALE = WAVE1_SIZE + WAVE2_SIZE; // 500
+    /// @notice Wave 1 paid cap: 245 NFTs at 200 USDC.
+    uint256 public constant WAVE1_SIZE = 245;
+    /// @notice Wave 2 paid cap: 245 NFTs at 350 USDC.
+    uint256 public constant WAVE2_SIZE = 245;
+    /// @notice Max paid mints (waves 1 + 2).
+    uint256 public constant PAID_TOTAL = WAVE1_SIZE + WAVE2_SIZE; // 490
+    /// @notice Strategic reserve mintable by owner (no USDC, no NEXUS).
+    uint256 public constant STRATEGIC_RESERVE_MAX = 10;
+    /// @notice Max supply including reserve (500).
+    uint256 public constant TOTAL_SUPPLY_CAP = PAID_TOTAL + STRATEGIC_RESERVE_MAX;
 
-    uint256 public constant WAVE1_PRICE = 200 * 1e6;  // 200 USDC (6 decimals)
-    uint256 public constant WAVE2_PRICE = 350 * 1e6;      // 350 USDC (6 decimals)
+    uint256 public constant WAVE1_PRICE = 200 * 1e6; // 200 USDC (6 decimals)
+    uint256 public constant WAVE2_PRICE = 350 * 1e6; // 350 USDC (6 decimals)
     uint256 public constant WAVE1_DURATION = 7 days;
     /// @dev 30% of USDC amount (6 decimals) → NEXUS with 18 decimals: amount * 30/100 * 1e18/1e6
-    uint256 private constant NEXUS_BONUS_BP = 3000;      // 30%
+    uint256 private constant NEXUS_BONUS_BP = 3000; // 30%
 
     uint256 private _nextTokenId;
+    /// @notice Active paid mints (non-cancelled); drives waves and presale linkage.
     uint256 private _activeSoldCount;
-    /// @notice Count of NFTs minted by the owner in wave 1 (max 5).
-    uint256 private _ownerWave1Mints;
-    /// @notice Count of NFTs minted by the owner in wave 2 (max 5).
-    uint256 private _ownerWave2Mints;
+    uint256 private _strategicReserveMinted;
     /// @notice Effective wave-2 start timestamp (time-based default, accelerated on wave-1 sellout).
     uint256 private _wave2StartTimestamp;
     address private _caspUsdcRecipient;
-    /// @notice Base URI for tokenURI (set by owner; used by explorers/marketplaces).
     string private _baseTokenURI;
 
     uint256 private constant CANCEL_WINDOW = 14 days;
@@ -54,13 +54,13 @@ contract TCGVaultFounderNFT is ERC721, Ownable2Step, ReentrancyGuard {
     mapping(uint256 => uint256) private _usdcPriceForToken;
     mapping(uint256 => uint256) private _nexusBonusForToken;
     mapping(uint256 => bool) private _cancelled;
-    mapping(uint256 => bool) private _ownerMinted;
-    mapping(uint256 => bool) private _ownerMintedInWave1;
+    mapping(uint256 => bool) private _isStrategicReserve;
 
     event CaspUsdcRecipientUpdated(address caspUsdcRecipient);
     event BaseURIUpdated(string baseURI);
     event FounderMinted(address buyer, uint256 tokenId, uint256 usdcAmount, uint256 nexusAmount, uint256 purchasedAt);
     event FounderPurchaseCancelled(address buyer, uint256 tokenId, uint256 usdcRefundDue, uint256 nexusClawedBack);
+    event StrategicReserveMinted(address to, uint256 tokenId);
 
     error Unauthorized();
     error AlreadyCancelled();
@@ -68,34 +68,44 @@ contract TCGVaultFounderNFT is ERC721, Ownable2Step, ReentrancyGuard {
     error CancellationWindowEnded();
     error ZeroAddress();
     error ExceedsSupply();
-    error OwnerWaveQuotaExceeded();
-    error ReservedForOwner();
+    error StrategicReserveNotCancellable();
+    error StrategicReserveCapReached();
 
     constructor(address usdc_, address nexusToken_, address caspUsdcRecipient_)
         ERC721("TCG-VAULT Founder", "TCGVF")
         Ownable(msg.sender)
     {
-        if (
-            nexusToken_ == address(0) ||
-            caspUsdcRecipient_ == address(0)
-        ) revert ZeroAddress();
+        if (nexusToken_ == address(0) || caspUsdcRecipient_ == address(0)) revert ZeroAddress();
         _usdc = IERC20(usdc_);
         _nexusToken = ITCGNexusToken(nexusToken_);
         _caspUsdcRecipient = caspUsdcRecipient_;
         emit CaspUsdcRecipientUpdated(caspUsdcRecipient_);
     }
 
-    // External getters (private/external pattern)
-    function usdc() external view returns (address) { return address(_usdc); }
-    function nexusToken() external view returns (address) { return address(_nexusToken); }
-    function wave2StartTimestamp() external view returns (uint256) { return _wave2StartTimestamp; }
-    function caspUsdcRecipient() external view returns (address) { return _caspUsdcRecipient; }
-    function ownerWave1Mints() external view returns (uint256) { return _ownerWave1Mints; }
-    function ownerWave2Mints() external view returns (uint256) { return _ownerWave2Mints; }
+    function usdc() external view returns (address) {
+        return address(_usdc);
+    }
 
-    /// @notice Number of active Founder NFTs sold (non-cancelled paid mints). Drives wave/price/countdown.
+    function nexusToken() external view returns (address) {
+        return address(_nexusToken);
+    }
+
+    function wave2StartTimestamp() external view returns (uint256) {
+        return _wave2StartTimestamp;
+    }
+
+    function caspUsdcRecipient() external view returns (address) {
+        return _caspUsdcRecipient;
+    }
+
+    /// @notice Active paid Founder mints (non-cancelled). Excludes strategic reserve NFTs.
     function soldCount() external view returns (uint256) {
         return _activeSoldCount;
+    }
+
+    /// @notice Number of strategic reserve NFTs minted so far (max 10).
+    function strategicReserveMinted() external view returns (uint256) {
+        return _strategicReserveMinted;
     }
 
     function currentWave() external view returns (uint256) {
@@ -124,35 +134,14 @@ contract TCGVaultFounderNFT is ERC721, Ownable2Step, ReentrancyGuard {
     }
 
     /**
-     * @notice Mint one Founder NFT. Pay in USDC; buyer receives 30% of price in $TCGNEXUS (whitepaper §7).
+     * @notice Mint one Founder NFT (paid). USDC; 30% of price in $TCGNEXUS (whitepaper §7).
      */
     function mint() external nonReentrant {
-        if (_activeSoldCount >= TOTAL_SALE) revert ExceedsSupply();
+        if (_activeSoldCount >= PAID_TOTAL) revert ExceedsSupply();
         if (_wave2StartTimestamp == 0) {
             _wave2StartTimestamp = block.timestamp + WAVE1_DURATION;
         }
-        bool isWave1 = block.timestamp < _wave2StartTimestamp;
-        if (msg.sender == owner()) {
-            // Owner: enforce per-wave quota but allow minting at any time.
-            if (isWave1) {
-                if (_ownerWave1Mints >= 5) revert OwnerWaveQuotaExceeded();
-                _ownerWave1Mints++;
-            } else {
-                if (_ownerWave2Mints >= 5) revert OwnerWaveQuotaExceeded();
-                _ownerWave2Mints++;
-            }
-        } else {
-            // Non-owner: always leave enough remaining supply in the wave for the owner to reach 5 mints.
-            if (isWave1) {
-                uint256 remainingInWave1 = WAVE1_SIZE - _activeSoldCount;
-                uint256 ownerQuotaLeft1 = 5 - _ownerWave1Mints;
-                if (remainingInWave1 <= ownerQuotaLeft1) revert ReservedForOwner();
-            } else {
-                uint256 remainingInWave2 = TOTAL_SALE - _activeSoldCount;
-                uint256 ownerQuotaLeft2 = 5 - _ownerWave2Mints;
-                if (remainingInWave2 <= ownerQuotaLeft2) revert ReservedForOwner();
-            }
-        }
+
         uint256 price = currentPrice();
         uint256 tokenId = _nextTokenId;
         _nextTokenId++;
@@ -161,31 +150,42 @@ contract TCGVaultFounderNFT is ERC721, Ownable2Step, ReentrancyGuard {
         if (_activeSoldCount == WAVE1_SIZE && block.timestamp < _wave2StartTimestamp) {
             _wave2StartTimestamp = block.timestamp;
         }
-        // MiCA: forward 100% of USDC mint price to an arbitrary CASP address.
+
         _usdc.safeTransferFrom(msg.sender, _caspUsdcRecipient, price);
 
         uint256 nexusAmount = (price * NEXUS_BONUS_BP * 1e18) / (10000 * 1e6);
-
         if (nexusAmount > 0) _nexusToken.mintPresaleBonus(msg.sender, nexusAmount);
 
         _purchasedAt[tokenId] = block.timestamp;
         _usdcPriceForToken[tokenId] = price;
         _nexusBonusForToken[tokenId] = nexusAmount;
-        if (msg.sender == owner()) {
-            _ownerMinted[tokenId] = true;
-            _ownerMintedInWave1[tokenId] = isWave1;
-        }
 
         _safeMint(msg.sender, tokenId);
 
         emit FounderMinted(msg.sender, tokenId, price, nexusAmount, block.timestamp);
     }
 
-    /// @notice MiCA cooling-off cancellation: burn NFT + claw back minted NEXUS bonus.
-    /// @dev USDC refund is off-chain (CASP rails). This contract emits refundDue amounts for indexing.
+    /**
+     * @notice Mint up to 10 strategic reserve NFTs (owner). No USDC, no NEXUS; not cancellable under MiCA purchase path.
+     */
+    function mintStrategicReserve(address to) external onlyOwner nonReentrant {
+        if (to == address(0)) revert ZeroAddress();
+        if (_strategicReserveMinted >= STRATEGIC_RESERVE_MAX) revert StrategicReserveCapReached();
+
+        uint256 tokenId = _nextTokenId;
+        _nextTokenId++;
+        _strategicReserveMinted++;
+        _isStrategicReserve[tokenId] = true;
+
+        _safeMint(to, tokenId);
+        emit StrategicReserveMinted(to, tokenId);
+    }
+
+    /// @notice MiCA cooling-off cancellation: paid mints only — burn NFT + claw back NEXUS bonus.
     function cancelFounderPurchase(uint256 tokenId) external nonReentrant {
         if (msg.sender != ownerOf(tokenId)) revert Unauthorized();
         if (_cancelled[tokenId]) revert AlreadyCancelled();
+        if (_isStrategicReserve[tokenId]) revert StrategicReserveNotCancellable();
 
         uint256 purchasedAt = _purchasedAt[tokenId];
         if (purchasedAt == 0) revert NotPurchasable();
@@ -206,16 +206,6 @@ contract TCGVaultFounderNFT is ERC721, Ownable2Step, ReentrancyGuard {
         }
 
         _activeSoldCount--;
-
-        if (_ownerMinted[tokenId]) {
-            if (_ownerMintedInWave1[tokenId]) {
-                _ownerWave1Mints--;
-            } else {
-                _ownerWave2Mints--;
-            }
-            delete _ownerMinted[tokenId];
-            delete _ownerMintedInWave1[tokenId];
-        }
 
         delete _purchasedAt[tokenId];
         delete _usdcPriceForToken[tokenId];

@@ -20,7 +20,7 @@
  *   1. Deploy: TCGVaultToken, TCGNexusToken, TCGVaultFounderNFT, TCGVaultInitialLaunch, BuyRouter, Wrapper, TCGR, Converter (USDC = real BSC USDC).
  *   2. Fund all accounts with real USDC via storage cheatcode (token initialLaunch is immutable = InitialLaunch; NEXUS presale bonus minters set in Nexus constructor).
  *   3. Trader buys TCGV (wave 1).
- *   4. Mint 250 Founder NFTs (245 trader + 5 owner) so wave 2 starts; exhaust to 500; wave-2 buys; large-scale multiple buyers.
+ *   4. Mint 245 Founder NFTs (paid, trader) so wave 2 starts; exhaust paid supply to PAID_TOTAL (490); wave-2 buys; large-scale multiple buyers.
  *   5. Time travel 121h, finalize; assert buy() reverts (PresaleEnded).
  *   6. Trader claims 10% TGE; vesting over 9 months.
  *   7. Optional: TCGV/USDC DEX liquidity, USDC→TCGV swap, BuyRouter referral, TCGR→TCGV convert.
@@ -89,10 +89,10 @@ async function setBSCUSDCBalance(
   }
 }
 
-const FOUNDER_NFT_WAVE1_CAP = 250;
-const WAVE1_NON_OWNER_MINTS = 245;
-const WAVE1_OWNER_MINTS = 5;
-const PRESALE_COUNTDOWN_HOURS = 120;
+const FOUNDER_NFT_WAVE1_CAP = 245;
+const WAVE1_TRADER_MINTS = 245;
+/** Must match `TCGVaultInitialLaunch.FINALIZE_DELAY_AFTER_PRESALE_END` (private; not on ABI). */
+const FINALIZE_DELAY_AFTER_PRESALE_END_SEC = 20 * 24 * 3600;
 const USDC_6 = 1_000_000n; // 1 USDC = 1e6
 
 /**
@@ -372,9 +372,8 @@ async function main() {
   console.log(`Trader bought with ${Number(buyUsdcAmount) / 1e6} USDC; TCGV allocated: ${formatEther(allocated[0])}`);
   console.log();
 
-  // --- Phase 4: Mint 250 Founder NFTs so wave 2 starts (5 owner first, then 245 trader) ---
-  // Owner mints the 5 reserved wave-1 slots first so trader never hits ReservedForOwner.
-  console.log("--- Phase 4: Mint 250 Founder NFTs (wave 2 starts) ---");
+  // --- Phase 4: Mint 245 paid Founder NFTs (wave 1) so wave 2 starts ---
+  console.log("--- Phase 4: Mint 245 Founder NFTs (wave 2 starts) ---");
   const wave1Price = 200n * USDC_6;
   let deployerUsdcBalance = await usdc.read.balanceOf([deployer.account.address]);
   let deployerAllowance = await usdc.read.allowance([deployer.account.address, founderNFTAddress]);
@@ -386,15 +385,10 @@ async function main() {
   }
   console.log("Deployer USDC balance:", deployerUsdcBalance.toString(), "| allowance for Founder NFT:", deployerAllowance.toString(), "| need:", wave1Price.toString());
   try {
-    await usdc.write.approve([founderNFTAddress, wave1Price * BigInt(WAVE1_OWNER_MINTS)], { account: deployer.account });
-    for (let i = 0; i < WAVE1_OWNER_MINTS; i++) {
-      await founderNFT.write.mint({ account: deployer.account });
-    }
-    console.log(`  Owner minted ${WAVE1_OWNER_MINTS} (reserved wave-1 slots).`);
-    await usdc.write.approve([founderNFTAddress, wave1Price * BigInt(WAVE1_NON_OWNER_MINTS)], { account: trader.account });
-    for (let i = 0; i < WAVE1_NON_OWNER_MINTS; i++) {
+    await usdc.write.approve([founderNFTAddress, wave1Price * BigInt(WAVE1_TRADER_MINTS)], { account: trader.account });
+    for (let i = 0; i < WAVE1_TRADER_MINTS; i++) {
       await founderNFT.write.mint({ account: trader.account });
-      if ((i + 1) % 50 === 0) console.log(`  Minted ${i + 1}/${WAVE1_NON_OWNER_MINTS} (trader)`);
+      if ((i + 1) % 50 === 0) console.log(`  Minted ${i + 1}/${WAVE1_TRADER_MINTS} (trader, wave 1)`);
     }
   } catch (e: unknown) {
     console.log("\n--- Phase 4 mint reverted ---");
@@ -403,7 +397,7 @@ async function main() {
       publicClient as { call: (args: { to: Address; data: `0x${string}`; account: Address }) => Promise<unknown> },
       founderNFTAddress,
       founderNFT.abi,
-      deployer.account.address,
+      trader.account.address,
     );
     const data = encodeFunctionData({
       abi: founderNFT.abi,
@@ -413,14 +407,14 @@ async function main() {
     await traceCall(publicClient as { request: (args: { method: string; params: unknown[] }) => Promise<unknown> }, {
       to: founderNFTAddress,
       data,
-      from: deployer.account.address,
+      from: trader.account.address,
     });
     throw e;
   }
   const soldCount = await founderNFT.read.soldCount();
   const w2 = await founderNFT.read.wave2StartTimestamp();
   if (soldCount !== BigInt(FOUNDER_NFT_WAVE1_CAP)) throw new Error(`Expected soldCount ${FOUNDER_NFT_WAVE1_CAP}, got ${soldCount}`);
-  if (w2 === 0n) throw new Error("wave2StartTimestamp should be set after 250 mints");
+  if (w2 === 0n) throw new Error("wave2StartTimestamp should be set after 245 wave-1 paid mints");
   console.log(`Founder NFT soldCount: ${soldCount}, wave2StartTimestamp: ${w2}`);
   console.log();
 
@@ -433,32 +427,26 @@ async function main() {
   await founderNFT.write.mint({ account: trader.account });
   const soldCountAfterOne = await founderNFT.read.soldCount();
   const nftPriceAfter = await founderNFT.read.currentPrice();
-  console.log("Founder NFT soldCount after extra mint (expected 251):", soldCountAfterOne);
+  console.log("Founder NFT soldCount after extra mint (expected 246):", soldCountAfterOne);
   console.log("FounderNFT currentPrice after extra mint (should stay 350):", Number(nftPriceAfter) / 1e6);
   console.log();
 
-  // --- Phase 4.B: Exhaust Founder NFT paid supply to TOTAL_SALE (500) ---
-  console.log("--- Phase 4.B: Exhaust Founder NFT supply to 500 ---");
-  const totalSale = await founderNFT.read.TOTAL_SALE();
+  // --- Phase 4.B: Exhaust Founder NFT paid supply to PAID_TOTAL (490) ---
+  console.log("--- Phase 4.B: Exhaust Founder NFT paid supply to PAID_TOTAL ---");
+  const paidTotal = await founderNFT.read.PAID_TOTAL();
   let paidSold = await founderNFT.read.soldCount();
-  console.log("TOTAL_SALE:", totalSale.toString(), "| already sold:", paidSold.toString());
-  if (paidSold < totalSale) {
-    const remaining = totalSale - paidSold;
+  console.log("PAID_TOTAL:", paidTotal.toString(), "| already sold:", paidSold.toString());
+  if (paidSold < paidTotal) {
+    const remaining = paidTotal - paidSold;
     const wave2PriceUsdc = 350n * USDC_6;
-    const traderWave2Mints = remaining - BigInt(WAVE1_OWNER_MINTS);
-    const ownerWave2Mints = BigInt(WAVE1_OWNER_MINTS);
-    await usdc.write.approve([founderNFTAddress, wave2PriceUsdc * traderWave2Mints], { account: trader.account });
-    for (let i = paidSold; i < paidSold + traderWave2Mints; i++) {
+    await usdc.write.approve([founderNFTAddress, wave2PriceUsdc * remaining], { account: trader.account });
+    for (let j = 0n; j < remaining; j++) {
       await founderNFT.write.mint({ account: trader.account });
-    }
-    await usdc.write.approve([founderNFTAddress, wave2PriceUsdc * ownerWave2Mints], { account: deployer.account });
-    for (let i = 0n; i < ownerWave2Mints; i++) {
-      await founderNFT.write.mint({ account: deployer.account });
     }
   }
   const soldCountAfterAllPaid = await founderNFT.read.soldCount();
-  if (soldCountAfterAllPaid !== totalSale) throw new Error(`Expected soldCount ${totalSale}, got ${soldCountAfterAllPaid}`);
-  console.log("Founder NFT soldCount after exhausting TOTAL_SALE:", soldCountAfterAllPaid.toString());
+  if (soldCountAfterAllPaid !== paidTotal) throw new Error(`Expected soldCount ${paidTotal}, got ${soldCountAfterAllPaid}`);
+  console.log("Founder NFT soldCount after exhausting PAID_TOTAL:", soldCountAfterAllPaid.toString());
   // Expected-revert test: one more mint must revert with ExceedsSupply (no try/catch on happy path).
   try {
     await founderNFT.write.mint({ account: trader.account });
@@ -546,18 +534,35 @@ async function main() {
   }
   console.log();
 
-  // --- Phase 5: Time travel 121h and finalize ---
-  console.log("--- Phase 5: Time travel 121h, set recipients, finalize ---");
+  // --- Phase 5: Time travel past presale end + finalize delay, then finalize ---
+  // `presaleEndTime()` = Founder `wave2Start` + 10d + 120h. `finalize()` requires
+  // `block.timestamp >= presaleEndTime() + 20d` (see `_canFinalizeNormally` in TCGVaultInitialLaunch).
+  console.log("--- Phase 5: Warp to presale end + 20d delay, set recipients, finalize ---");
+  const presaleEnd = await initialLaunch.read.presaleEndTime();
+  const maxU256 = 2n ** 256n - 1n;
+  if (presaleEnd >= maxU256) throw new Error("presaleEndTime is unset (max); Founder wave2 / countdown not linked");
+  const head = await publicClient.getBlock({ blockTag: "latest" });
+  const nowTs = head.timestamp;
+  const finalizeEligibleTs = presaleEnd + BigInt(FINALIZE_DELAY_AFTER_PRESALE_END_SEC) + 1n;
+  const warpSec = finalizeEligibleTs > nowTs ? finalizeEligibleTs - nowTs : 0n;
+  console.log(
+    `presaleEndTime=${presaleEnd} now=${nowTs} → warp +${warpSec.toString()}s (incl. ${FINALIZE_DELAY_AFTER_PRESALE_END_SEC}s post-end delay)`,
+  );
   try {
-    if (networkHelpers?.time) {
-      await networkHelpers.time.increase(PRESALE_COUNTDOWN_HOURS * 3600 + 3600 + 20 * 24 * 3600);
-      await networkHelpers.mine();
-      console.log("Time increased by 121h and block mined.");
+    if (warpSec > 0n) {
+      if (networkHelpers?.time) {
+        await networkHelpers.time.increase(Number(warpSec));
+        await networkHelpers.mine();
+      } else {
+        const rpc = publicClient as { request: (args: { method: string; params: unknown[] }) => Promise<unknown> };
+        await rpc.request({ method: "evm_increaseTime", params: [Number(warpSec)] });
+        await rpc.request({ method: "evm_mine", params: [] });
+      }
+      console.log("Time warped and block mined.");
     } else {
-      const rpc = publicClient as { request: (args: { method: string; params: unknown[] }) => Promise<unknown> };
-      await rpc.request({ method: "evm_increaseTime", params: [PRESALE_COUNTDOWN_HOURS * 3600 + 3600 + 20 * 24 * 3600] });
-      await rpc.request({ method: "evm_mine", params: [] });
-      console.log("Time increased by 121h (Anvil/evm) and block mined.");
+      console.log("Already past finalize window; mining one block.");
+      if (networkHelpers?.mine) await networkHelpers.mine();
+      else await (publicClient as { request: (args: { method: string; params: unknown[] }) => Promise<unknown> }).request({ method: "evm_mine", params: [] });
     }
   } catch (e) {
     console.warn("Time travel not supported (e.g. live RPC); skipping. Finalize may revert.", e instanceof Error ? e.message : e);
@@ -706,15 +711,45 @@ async function main() {
       const traderTcgvBal = await token.read.balanceOf([trader.account.address]);
       if (traderTcgvBal >= fundAmount) {
         await token.write.transfer([converterAddress, fundAmount], { account: trader.account });
-        const convertAmount = deployerTcgrBal / 2n;
-        if (convertAmount > 0n) {
-          const deployerTcgvBefore = await token.read.balanceOf([deployer.account.address]);
-          await tcgr.write.approve([converterAddress, convertAmount], { account: deployer.account });
-          await converter.write.convert([convertAmount, convertAmount], { account: deployer.account });
-          const deployerTcgvAfter = await token.read.balanceOf([deployer.account.address]);
-          const tcgvOut = deployerTcgvAfter - deployerTcgvBefore;
-          console.log("Convert TCGR→TCGV: burned", formatEther(convertAmount), "TCGR → received", formatEther(tcgvOut), "TCGV (1:1)");
-          if (tcgvOut !== convertAmount) throw new Error(`Converter ratio mismatch: expected ${convertAmount}, got ${tcgvOut}`);
+        const targetConvertAmount = deployerTcgrBal / 2n;
+        if (targetConvertAmount > 0n) {
+          let unlockedTcgr = await tcgr.read.unlockedReferralBalance([deployer.account.address]);
+          if (unlockedTcgr < targetConvertAmount) {
+            const bucket = await tcgr.read.REFERRAL_VESTING_BUCKET();
+            console.log(
+              "TCGR unlock before convert:",
+              formatEther(unlockedTcgr),
+              "available, target",
+              formatEther(targetConvertAmount),
+              "→ warping one vesting bucket",
+            );
+            try {
+              if (networkHelpers?.time) {
+                await networkHelpers.time.increase(Number(bucket) + 1);
+                await networkHelpers.mine();
+              } else {
+                const rpc = publicClient as { request: (args: { method: string; params: unknown[] }) => Promise<unknown> };
+                await rpc.request({ method: "evm_increaseTime", params: [Number(bucket) + 1] });
+                await rpc.request({ method: "evm_mine", params: [] });
+              }
+            } catch (e) {
+              console.warn("Could not warp for TCGR unlock; conversion will use current unlocked amount:", e instanceof Error ? e.message : e);
+            }
+            unlockedTcgr = await tcgr.read.unlockedReferralBalance([deployer.account.address]);
+          }
+
+          const convertAmount = unlockedTcgr < targetConvertAmount ? unlockedTcgr : targetConvertAmount;
+          if (convertAmount > 0n) {
+            const deployerTcgvBefore = await token.read.balanceOf([deployer.account.address]);
+            await tcgr.write.approve([converterAddress, convertAmount], { account: deployer.account });
+            await converter.write.convert([convertAmount, convertAmount], { account: deployer.account });
+            const deployerTcgvAfter = await token.read.balanceOf([deployer.account.address]);
+            const tcgvOut = deployerTcgvAfter - deployerTcgvBefore;
+            console.log("Convert TCGR→TCGV: burned", formatEther(convertAmount), "TCGR → received", formatEther(tcgvOut), "TCGV (1:1)");
+            if (tcgvOut !== convertAmount) throw new Error(`Converter ratio mismatch: expected ${convertAmount}, got ${tcgvOut}`);
+          } else {
+            console.log("Convert TCGR→TCGV skipped: no unlocked TCGR available after vesting check.");
+          }
         }
       }
     }

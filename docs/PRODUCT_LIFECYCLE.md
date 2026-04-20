@@ -6,22 +6,21 @@ Summary of how the main phases behave **in this repository’s Solidity contract
 
 ## On-chain fees (defaults)
 
-Numeric defaults, mutability (`ADMIN_ROLE`, router `onlyOwner`), token/router fee caps (`TCGVaultToken.MAX_BUY_TAX_BP = 600`, `TCGVaultToken.MAX_SELL_TAX_BP = 500`, `TCGVaultBuyRouter.MAX_BUY_TOTAL_BP = 500`, `TCGVaultBuyRouter.MAX_SELL_TAX_BP = 400`), and the split between **direct V2 pool (`TCGVaultToken`)** and **`TCGVaultBuyRouter` (USDC)** are fully specified in [**FEE_REFERENCE.md**](FEE_REFERENCE.md). Summary:
+Numeric defaults, mutability (`ADMIN_ROLE`, router `onlyOwner`), caps (`TCGVaultToken.MAX_BUY_TAX_BP = 600`, `TCGVaultToken.MAX_SELL_TAX_BP = 500`, `TCGVaultBuyRouter.MAX_BUY_TOTAL_BP = 500`, `TCGVaultBuyRouter.MAX_SELL_TAX_BP = 400`), and the split between **paire (`TCGVaultToken`, routeur OFF)** and **portail USDC (`TCGVaultBuyRouter`, routeur ON)** are in [**FEE_REFERENCE.md**](FEE_REFERENCE.md). Summary:
 
-- **Direct pool buy:** **6%** TCGV fee, thirds to vault / marketing / `pendingAutolp`; no swap-tax supply burn.
-- **Direct pool sell:** **5%** TCGV fee; default **40% / 40% / 20% / 0%** of the fee to vault / autolp / marketing / community.
-- **Router buy:** **5%** of USDC in (default **3% + 2%** vault + marketing); **100%** of TCGV out to buyer; no TCGV burn on that leg.
-- **Router sell:** **4%** of USDC out by default; four-way split on the fee (see **FEE_REFERENCE.md**, section 2.2).
-- **NEXUS cashback (buys only):** **30%** of TCGV buy amount while presale flag is active, **10%** after (`TCGVaultToken`).
+- **Direct pool buy (routeur OFF):** **6%** TCGV; thirds to vault / marketing / `pendingAutolp` (**~2% + 2% + 2%** notional); no supply burn; **no $TCGNEXUS** on this path.
+- **Direct pool sell:** **5%** TCGV; default **40% / 40% / 20%** of the fee to vault / autolp / marketing (**2% + 2% + 1%** notional; community **0%** default).
+- **Router buy (routeur ON):** **5%** of USDC in (**3% + 2%** vault + marketing); **100%** of TCGV out to buyer.
+- **Router sell:** **4%** of USDC out; four-way split (**FEE_REFERENCE.md** §2.2).
+- **$TCGNEXUS cashback (portail):** **30%** / **10%** of TCGV via `recordBuyAndMintCashback` (`TCGVaultToken`).
 
 ## Product lifecycle
 
 1. **Founder NFT sale (500 units)**  
-   - Wave 1: **up to 250 NFTs** at **200 USDC** for **7 days from the first Founder mint** (`WAVE1_DURATION`).  
-   - Wave 2: **350 USDC** starts automatically after that 7-day window, or earlier if wave 1 sells out before the timer (`wave2StartTimestamp`).  
-   - Each paid mint: USDC split **30%** vault / **60%** liquidity / **10%** ops (rounding remainder to ops).  
-   - Buyer receives **30%** of the USDC price as NEXUS (18 decimals; `TCGVaultFounderNFT`).  
-   - Owner may mint up to **5** NFTs per wave at the same price; public mints revert with `ReservedForOwner` when the remaining wave supply would not leave room for that reserve.
+   - **490** mints payants : vague 1 **245** × **200 USDC** (7 jours depuis le premier mint payant), puis vague 2 **245** × **350 USDC** (ou bascule anticipée si les 245 de vague 1 sont vendus).  
+   - **10** NFT « réserve stratégique » : `mintStrategicReserve` (owner, sans USDC ni bonus NEXUS).  
+   - Chaque mint payant : USDC **30%** vault / **60%** liquidité / **10%** ops (arrondis vers ops si besoin).  
+   - L’acheteur reçoit **30%** du prix en NEXUS (18 décimales ; `TCGVaultFounderNFT`).
 
 2. **Token presale (Initial Launch)**  
    - Users spend **USDC** for a **TCGV allocation** (vesting on the launch contract).  
@@ -45,8 +44,8 @@ USDC custody and cooling-off cancellation are intentionally split between on-cha
 This architecture is used to satisfy the requirement that client funds are routed to regulated custody rails (CASP/treasury) instead of being held in smart contract escrow.
 
 3. **Post-TGE trading**  
-   - **`TCGVaultBuyRouter`:** USDC buy path (default **5%** USDC fee then swap; NEXUS via token); USDC sell path (default **4%** on USDC out — see **FEE_REFERENCE.md**). Router is fee-excluded on `TCGVaultToken` so pool taxes are not applied twice on that path.  
-   - **`TCGVaultToken`:** direct pair swaps (**6%** buy / **5%** sell defaults in TCGV); presale flag, cashback, blacklist, pause, `pendingAutolp`, vesting hooks.
+   - **`TCGVaultBuyRouter` (routeur ON):** **5%** USDC buy, **4%** USDC sell; $TCGNEXUS via token; fee-excluded on `TCGVaultToken` (no double tax).  
+   - **`TCGVaultToken` (routeur OFF / paire):** **6%** buy / **5%** sell defaults in TCGV; presale flag, cashback portail uniquement, blacklist, pause, `pendingAutolp`, vesting hooks.
 
 4. **Staking + Basic NFT**  
    - **ERC-4626** vault over TCGV. Depositing enough shares (≥ `requiredStakeForBasicNFT`) mints a **Basic NFT** to the **receiver**; withdrawing below the minimum **burns** that wallet’s Basic NFT.  
