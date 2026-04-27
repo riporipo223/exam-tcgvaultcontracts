@@ -62,7 +62,7 @@ contract TCGVaultLiquidityWrapper is Ownable2Step {
         uint256 deadline
     ) external returns (uint256 amountA, uint256 amountB, uint256 liquidity) {
         if (!_allowedRouters[router]) revert RouterNotAllowed();
-        _pullExactTcgv(msg.sender, amountADesired);
+        _pullExact(tcgvToken, msg.sender, amountADesired);
         _pullExact(tokenB, msg.sender, amountBDesired);
         IERC20(tcgvToken).approve(router, amountADesired);
         IERC20(tokenB).approve(router, amountBDesired);
@@ -121,15 +121,6 @@ contract TCGVaultLiquidityWrapper is Ownable2Step {
             IERC20(tokenB).safeTransfer(msg.sender, tokenBOut);
         }
         return (tcgvOut, tokenBOut);
-    }
-
-    function _pullExactTcgv(address from, uint256 expectedAmount) private {
-        uint256 balanceBefore = IERC20(tcgvToken).balanceOf(address(this));
-        IERC20(tcgvToken).transferFrom(from, address(this), expectedAmount);
-        uint256 receivedAmount = IERC20(tcgvToken).balanceOf(address(this)) - balanceBefore;
-        if (receivedAmount != expectedAmount) {
-            revert FeeOnTransferTokenNotSupported(tcgvToken, expectedAmount, receivedAmount);
-        }
     }
 
     function _pullExact(address token, address from, uint256 expectedAmount) private {
