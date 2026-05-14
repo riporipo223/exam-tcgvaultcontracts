@@ -11,7 +11,7 @@ Fee and role behavior as implemented in **`contracts/`** in this repository. Alw
 
 The buy router is **fee-excluded** on `TCGVaultToken` so USDC-path swaps are not taxed twice by pool fees.
 
-**Basis points:** `10000` = 100%. **Mutability:** pool taxes — `TCGVaultToken` (`setBuyFeeParams` / `setSellFeeParams`, **`ADMIN_ROLE`**); USDC router — `TCGVaultBuyRouter` (`setBuyFeeParams` / `setSellFeeParams`, **`onlyOwner`**). Fee-rate setters are **monotonic non-increasing** (tax bps never increase vs current on-chain value). **Caps:** `TCGVaultToken`: **`MAX_BUY_TAX_BP = 600`**, **`MAX_SELL_TAX_BP = 500`**; `TCGVaultBuyRouter`: **`MAX_BUY_TOTAL_BP = 500`**, **`MAX_SELL_TAX_BP = 400`**. **No fee-driven TCGV supply burn** on these paths (fees accrue to recipients / `pendingAutolp`; router sends 100% of purchased TCGV to the buyer).
+**Basis points:** `10000` = 100%. **Mutability:** pool taxes — `TCGVaultToken` (`setBuyFeeParams` / `setSellFeeParams`, **`ADMIN_ROLE`**); USDC router — `TCGVaultBuyRouter` (`setBuyFeeParams` / `setSellFeeParams`, **`onlyOwner`**). Buy/sell **tax bps** are bounded only by immutable **`MAX_*`** constants (they may be raised again after being lowered, including after a mistaken zero). Router buy legs must keep **`vaultBp + marketingBp + communityBp` ≤ `MAX_BUY_TOTAL_BP`**. **Caps:** `TCGVaultToken`: **`MAX_BUY_TAX_BP = 600`**, **`MAX_SELL_TAX_BP = 500`**; `TCGVaultBuyRouter`: **`MAX_BUY_TOTAL_BP = 500`**, **`MAX_SELL_TAX_BP = 400`**. **No fee-driven TCGV supply burn** on these paths (fees accrue to recipients / `pendingAutolp`; router sends 100% of purchased TCGV to the buyer).
 
 ---
 
@@ -80,8 +80,8 @@ Shares sum to **10000** on the fee amount when calling `setSellFeeParams`.
 
 | Function | Who | Notes |
 |----------|-----|-------|
-| `setBuyFeeParams(vaultBp, marketingBp, communityBp)` | Owner | Monotonic legs; total ≤ `MAX_BUY_TOTAL_BP` (500). |
-| `setSellFeeParams(...)` | Owner | `taxBp` ≤ `MAX_SELL_TAX_BP` (400), monotonic; four shares sum **10000**. |
+| `setBuyFeeParams(vaultBp, marketingBp, communityBp)` | Owner | Sum of legs ≤ `MAX_BUY_TOTAL_BP` (500). |
+| `setSellFeeParams(...)` | Owner | `taxBp` ≤ `MAX_SELL_TAX_BP` (400); four shares sum **10000**. |
 | `setReferralToken` | Owner | Optional TCGR. |
 
 ### 2.4 TCGR referral (optional)

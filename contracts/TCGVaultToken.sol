@@ -387,8 +387,8 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         uint256 marketingShareBp,
         uint256 autolpShareBp
     ) external onlyRole(ADMIN_ROLE) {
-        // Monotonic fee policy: tax may only stay the same or decrease.
-        if (buyTaxBp > BUY_TAX || buyTaxBp > MAX_BUY_TAX_BP) revert InvalidFeeParams();
+        // Ceiling is immutable MAX_* only (not current BUY_TAX) so a mistaken zero does not permanently block restoring fees within the cap.
+        if (buyTaxBp > MAX_BUY_TAX_BP) revert InvalidFeeParams();
         if (vaultShareBp + marketingShareBp + autolpShareBp != 10000) revert InvalidFeeParams();
         BUY_TAX = buyTaxBp;
         BUY_VAULT_SHARE = vaultShareBp;
@@ -408,8 +408,8 @@ contract TCGVaultToken is ERC20, AccessControl, ReentrancyGuard {
         uint256 marketingShareBp,
         uint256 communityShareBp
     ) external onlyRole(ADMIN_ROLE) {
-        // Monotonic fee policy: tax may only stay the same or decrease.
-        if (sellTaxBp > SELL_TAX || sellTaxBp > MAX_SELL_TAX_BP) revert InvalidFeeParams();
+        // Ceiling is immutable MAX_* only (not current SELL_TAX) so a mistaken zero does not permanently block restoring fees within the cap.
+        if (sellTaxBp > MAX_SELL_TAX_BP) revert InvalidFeeParams();
         if (vaultShareBp + autolpShareBp + marketingShareBp + communityShareBp != 10000) {
             revert InvalidFeeParams();
         }

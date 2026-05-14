@@ -97,9 +97,9 @@ Script: `yarn deploy:bsctest` → `scripts/deployBscTestnet.ts` on Hardhat netwo
 
 Authoritative detail: [**FEE_REFERENCE.md**](FEE_REFERENCE.md).
 
-**`TCGVaultToken` (routeur OFF / paire):** default buy **6%** (`BUY_TAX = 600`), shares **3333 / 3333 / 3334**; default sell **5%** (`SELL_TAX = 500`), shares **4000 / 4000 / 2000 / 0**. Caps **`MAX_BUY_TAX_BP = 600`**, **`MAX_SELL_TAX_BP = 500`**. **`ADMIN_ROLE`**, shares sum **10_000**, monotonic tax.
+**`TCGVaultToken` (routeur OFF / paire):** default buy **6%** (`BUY_TAX = 600`), shares **3333 / 3333 / 3334**; default sell **5%** (`SELL_TAX = 500`), shares **4000 / 4000 / 2000 / 0**. Caps **`MAX_BUY_TAX_BP = 600`**, **`MAX_SELL_TAX_BP = 500`**. **`ADMIN_ROLE`**, shares sum **10_000**; tax bps may move up or down within those caps.
 
-**`TCGVaultBuyRouter` (routeur ON / USDC):** default **5%** USDC in (**300** + **200** + **0** bps); default sell **4%** USDC out, split **3750 / 2500 / 1250 / 2500**. Caps **`MAX_BUY_TOTAL_BP = 500`**, **`MAX_SELL_TAX_BP = 400`**. **`onlyOwner`**, monotonic.
+**`TCGVaultBuyRouter` (routeur ON / USDC):** default **5%** USDC in (**300** + **200** + **0** bps); default sell **4%** USDC out, split **3750 / 2500 / 1250 / 2500**. Caps **`MAX_BUY_TOTAL_BP = 500`**, **`MAX_SELL_TAX_BP = 400`**. **`onlyOwner`**; buy legs sum ≤ **`MAX_BUY_TOTAL_BP`**.
 
 ## Important Notes
 
@@ -121,7 +121,7 @@ Authoritative detail: [**FEE_REFERENCE.md**](FEE_REFERENCE.md).
 
 - The token uses `ReentrancyGuard` for sell operations; the buy router uses transient reentrancy protection.
 - **`ADMIN_ROLE`** can toggle fees via `setFeesEnabled`; pause / unpause use **`PAUSER_ROLE`** / **`UNPAUSER_ROLE`**; blacklist uses **`BLACKLISTER_ROLE`**. **`DEFAULT_ADMIN_ROLE`** is intended for granting/revoking those roles only (deployer holds all roles at construction).
-- Fee **rates and splits** are **governable** within caps (`TCGVaultToken` paire: **600/500**; `TCGVaultBuyRouter`: **500/400**) and monotonic tax setters. Read on-chain values when integrating.
+- Fee **rates and splits** are **governable** within caps (`TCGVaultToken` paire: **600/500**; `TCGVaultBuyRouter`: **500/400** on buy sum / **400** sell tax). Read on-chain values when integrating.
 - Emergency patterns (pause, blacklist) are documented in the Solidity files.
 
 ## Functions
@@ -137,7 +137,7 @@ Authoritative detail: [**FEE_REFERENCE.md**](FEE_REFERENCE.md).
 - `setFeesEnabled(bool)` — Enable/disable fees
 - `setCashbackEnabled(bool)` — Enable/disable cashback
 - `setMinAmounts(uint256, uint256)` — Set minimum buy/sell amounts for fee computation
-- `setBuyFeeParams` / `setSellFeeParams` — Update **paire** (routeur OFF) tax bps and splits (shares sum to 10_000; tax ≤ `MAX_BUY_TAX_BP` / `MAX_SELL_TAX_BP`, monotonic)
+- `setBuyFeeParams` / `setSellFeeParams` — Update **paire** (routeur OFF) tax bps and splits (shares sum to 10_000; tax ≤ `MAX_BUY_TAX_BP` / `MAX_SELL_TAX_BP`)
 - `setAllocationRecipients` — Liquidity / team / ops recipients required before supply recompute
 - `setBuyRouter` — Wire `TCGVaultBuyRouter` (zero address clears)
 

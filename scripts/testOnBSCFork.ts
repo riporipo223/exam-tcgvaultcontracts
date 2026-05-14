@@ -8,6 +8,7 @@ import {
   keccak256,
   encodeAbiParameters,
   toHex,
+  type Account,
   type Address,
 } from "viem";
 
@@ -15,7 +16,8 @@ import {
  * End-to-end test script for TCG Vault on BSC fork (post-presale tokenomics).
  *
  * Presale flow is covered by scripts/testFullFlowOnBSCFork.ts. This script validates DEX and BuyRouter:
- *   Phase 1 — Deploy: MockPresaleLaunch, TCGNexusToken, TCGVaultToken (immutable staking vault), TCGVaultStakingVault, BuyRouter, Wrapper (MockPresaleLaunch for initial supply)
+ *   Phase 1 — Deploy: MockPresaleLaunch, TCGNexusToken, TCGVaultToken (immutable staking vault), TCGVaultStakingVault, BuyRouter, Wrapper (MockPresaleLaunch for initial supply).
+ *   BuyRouter USDC fees accrue in `pendingUsdcFees` until each recipient calls `claimUsdcFees` (EOA recipients from Hardhat accounts; plain `FeeReceiver` cannot claim).
  *   Phase 2 — Pair TCGV/USDC only, add liquidity via wrapper
  *   Phase 3 — Buy: PancakeSwap USDC→TCGV (3.1), TCGVaultBuyRouter USDC→TCGV (3.2), direct pair USDC→TCGV (3.3), dummy router USDC (5.2)
  *   Phase 4 — Sell: PancakeSwap TCGV→USDC (4.1), TCGVaultBuyRouter TCGV→USDC (4.2)
@@ -23,7 +25,9 @@ import {
  * Recommended (Hardhat fork, no Anvil):
  *   BSC_RPC_URL="https://your-bsc-rpc" yarn hardhat run scripts/testOnBSCFork.ts --network hardhat
  *
- * Optional (Anvil): start Anvil with --fork-url <BSC_RPC>, then --network localhost
+ * Optional (Anvil on :8545): `anvil --fork-url <BSC_RPC> --hardfork cancun` (or `latest`). Without `--hardfork`,
+ *   `eth_call` can fail with “No known hardfork for execution on historical block … not configured with a hardfork activation history”.
+ *   Then: `yarn hardhat run scripts/testOnBSCFork.ts --network localhost`
  */
 
 const PANCAKE_ROUTER = "0x10ED43C718714eb63d5aA57B78B54704E256024E" as Address;
@@ -73,6 +77,40 @@ const CASHBACK_BP_PRESALE = 3000; // 30% NEXUS during presale (portail / recordB
 // Pool path (routeur OFF): 5% sell → 2% vault + 2% autolp of notional (40% + 40% of fee)
 const POOL_SELL_VAULT_PLUS_AUTOLP_BP = 400;
 
+type WalletLike = { account: Account };
+
+function walletForAddress(address: Address, wallets: readonly WalletLike[]): WalletLike {
+  const lower = address.toLowerCase();
+  const w = wallets.find((x) => x.account.address.toLowerCase() === lower);
+  if (!w) {
+    throw new Error(
+      `No Hardhat account controls ${address}. BuyRouter fee recipients must be EOAs that can call claimUsdcFees (add accounts in hardhat.config or reuse deployer/trader).`,
+    );
+  }
+  return w;
+}
+
+/** Pull-model USDC fees: each unique recipient with pending balance claims from the router. */
+async function claimBuyRouterPendingUsdc(
+  buyRouter: {
+    read: { pendingUsdcFees: (args: readonly [Address]) => Promise<bigint> };
+    write: { claimUsdcFees: (opts: { account: Account }) => Promise<`0x${string}`> };
+  },
+  recipients: readonly Address[],
+  wallets: readonly WalletLike[],
+): Promise<void> {
+  const seen = new Set<string>();
+  for (const addr of recipients) {
+    const k = addr.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const pending = await buyRouter.read.pendingUsdcFees([addr]);
+    if (pending === 0n) continue;
+    const wc = walletForAddress(addr, wallets);
+    await buyRouter.write.claimUsdcFees({ account: wc.account });
+  }
+}
+
 async function main() {
   const { viem, networkHelpers } = await hre.network.connect();
   const wallets = await viem.getWalletClients();
@@ -81,19 +119,11 @@ async function main() {
   }
   const deployer = wallets[0]!;
   const trader = wallets[1]!;
-  // Use dedicated receiver contracts so fee receipts can be verified reliably on fork nodes.
-  const vaultReceiver = await viem.deployContract("FeeReceiver", [], {
-    client: { wallet: deployer },
-  });
-  const marketingReceiver = await viem.deployContract("FeeReceiver", [], {
-    client: { wallet: deployer },
-  });
-  const communityReceiver = await viem.deployContract("FeeReceiver", [], {
-    client: { wallet: deployer },
-  });
-  const vaultAddr = vaultReceiver.address as Address;
-  const marketingAddr = marketingReceiver.address as Address;
-  const communityAddr = communityReceiver.address as Address;
+  // BuyRouter credits USDC fees to `pendingUsdcFees[recipient]`; recipients must call `claimUsdcFees`.
+  // Use Hardhat EOAs (not plain contracts) so the script can pull fees after each router buy/sell.
+  const vaultAddr = deployer.account.address as Address;
+  const marketingAddr = trader.account.address as Address;
+  const communityAddr = (wallets[2]?.account.address ?? deployer.account.address) as Address;
 
   const publicClient = await viem.getPublicClient();
   const setStorageAt: SetStorageAtFn = async (address, slotHex, valueHex) => {
@@ -468,27 +498,48 @@ async function main() {
   const traderTcgvAfter2 = (await token.read.balanceOf([trader.account.address]));
   const supplyAfter2 = await token.read.totalSupply();
   const burn2 = supplyBefore2 - supplyAfter2;
-  const vaultUsdcAfter2 = await usdc.read.balanceOf([vaultAddr]);
-  const marketingUsdcAfter2 = await usdc.read.balanceOf([marketingAddr]);
+  const pendingVaultUsdc = await buyRouter.read.pendingUsdcFees([vaultAddr]);
+  const pendingMarketingUsdc = await buyRouter.read.pendingUsdcFees([marketingAddr]);
   const nexusAfter2 = (await nexusToken.read.balanceOf([trader.account.address]));
   const traderTcgvDelta2 = traderTcgvAfter2 - traderTcgvBefore2;
-  const vaultUsdcDelta2 = vaultUsdcAfter2 - vaultUsdcBefore2;
-  const marketingUsdcDelta2 = marketingUsdcAfter2 - marketingUsdcBefore2;
   const nexusDelta2 = nexusAfter2 - nexusBefore2;
   if (traderTcgvDelta2 === 0n) {
     throw new Error("3.2 Buy via TCGVaultBuyRouter: trader received 0 TCGV");
   }
 
-  const routerUsdcAfter2 = await usdc.read.balanceOf([buyRouterAddress]);
+  const routerUsdcBeforeClaim = await usdc.read.balanceOf([buyRouterAddress]);
+  const expectedBuyFeeUsdc = (buyRouterUSDC * 500n) / 10000n;
+
   console.log(`    Trader TCGV: +${formatEther(traderTcgvDelta2)}`);
   console.log(`    Supply Δ:    ${formatEther(burn2)} TCGV (expect ~0; no router TCGV burn)`);
   console.log(`    USDC fee: 5% (3% vault, 2% structure). No TCGV burn.`);
-  console.log(`    Vault USDC:     +${Number(vaultUsdcDelta2) / 1e6} (expected >= ${Number(expectedVaultUsdcMin) / 1e6})`);
-  console.log(`    Marketing USDC: +${Number(marketingUsdcDelta2) / 1e6} (expected >= ${Number(expectedMarketingUsdcMin) / 1e6})`);
-  console.log(`    Router USDC after: ${Number(routerUsdcAfter2) / 1e6} (expected 0)`);
+  console.log(
+    `    Pending USDC (router ledger): vault ${Number(pendingVaultUsdc) / 1e6}, marketing ${Number(pendingMarketingUsdc) / 1e6} (expect >= ${Number(expectedVaultUsdcMin) / 1e6} / ${Number(expectedMarketingUsdcMin) / 1e6})`,
+  );
+  console.log(
+    `    Router USDC balance before claim: ${Number(routerUsdcBeforeClaim) / 1e6} (fee USDC held until claimUsdcFees; ~${Number(expectedBuyFeeUsdc) / 1e6} from this buy)`,
+  );
+
+  if (pendingVaultUsdc < expectedVaultUsdcMin - expectedVaultUsdcMin / 20n) {
+    throw new Error(`3.2 Vault pending USDC: expected >= ${expectedVaultUsdcMin}, got ${pendingVaultUsdc}`);
+  }
+  if (pendingMarketingUsdc < expectedMarketingUsdcMin - expectedMarketingUsdcMin / 20n) {
+    throw new Error(`3.2 Marketing pending USDC: expected >= ${expectedMarketingUsdcMin}, got ${pendingMarketingUsdc}`);
+  }
+
+  await claimBuyRouterPendingUsdc(buyRouter, [vaultAddr, marketingAddr, communityAddr], wallets);
+
+  const vaultUsdcAfter2 = await usdc.read.balanceOf([vaultAddr]);
+  const marketingUsdcAfter2 = await usdc.read.balanceOf([marketingAddr]);
+  const vaultUsdcDelta2 = vaultUsdcAfter2 - vaultUsdcBefore2;
+  const marketingUsdcDelta2 = marketingUsdcAfter2 - marketingUsdcBefore2;
+  const routerUsdcAfter2 = await usdc.read.balanceOf([buyRouterAddress]);
+  console.log(`    Vault USDC:     +${Number(vaultUsdcDelta2) / 1e6} (after claim)`);
+  console.log(`    Marketing USDC: +${Number(marketingUsdcDelta2) / 1e6} (after claim)`);
+  console.log(`    Router USDC after claim: ${Number(routerUsdcAfter2) / 1e6} (expected 0)`);
 
   if (routerUsdcAfter2 !== 0n) {
-    throw new Error(`3.2 Router must retain 0 USDC, got ${routerUsdcAfter2}`);
+    throw new Error(`3.2 Router must retain 0 USDC after claims, got ${routerUsdcAfter2}`);
   }
   if (vaultUsdcDelta2 < expectedVaultUsdcMin - expectedVaultUsdcMin / 20n) {
     throw new Error(`3.2 Vault USDC: expected >= ${expectedVaultUsdcMin}, got +${vaultUsdcDelta2}`);
@@ -503,7 +554,7 @@ async function main() {
   }
   console.log(`    NEXUS:         +${formatEther(nexusDelta2)}`);
   const compareBuyRouter = { usdc: buyRouterUSDC, traderTcgv: traderTcgvDelta2, burned: burn2, nexusDelta: nexusDelta2 };
-  console.log("    [OK] 3.2 Vault + Marketing USDC and NEXUS 30% presale cashback match whitepaper");
+  console.log("    [OK] 3.2 Pending fees, claimUsdcFees, vault + marketing USDC, NEXUS ~30% presale cashback");
   console.log();
 
   // Deploy dummy router before 3.3 so we use its getAmountsOut for the direct swap — same formula as 5.2 for a fair comparison.
@@ -758,6 +809,11 @@ async function main() {
     }
   }
   console.log("    [OK] 4.2 BuyRouter sell: 4% USDC fee split, no TCGV burn");
+  await claimBuyRouterPendingUsdc(buyRouter, [vaultAddr, marketingAddr, communityAddr], wallets);
+  const routerUsdcAfterSell = await usdc.read.balanceOf([buyRouterAddress]);
+  if (routerUsdcAfterSell !== 0n) {
+    throw new Error(`4.2 Router USDC after sell fee claims: expected 0, got ${routerUsdcAfterSell}`);
+  }
   console.log();
 
   // --- Sell comparison: same TCGV sold, both routes give USDC ---
@@ -793,9 +849,9 @@ async function main() {
   console.log();
   console.log("Tokenomics verified:");
   console.log("  Buy (Pancake direct): 6% TCGV routeur OFF (~2% vault, ~2% structure, ~2% autolp); no NEXUS on pair — no fee burn");
-  console.log("  Buy (BuyRouter):      5% USDC routeur ON (3% vault, 2% structure) + NEXUS cashback — no TCGV burn");
+  console.log("  Buy (BuyRouter):      5% USDC routeur ON (accrued on router → claimUsdcFees) + NEXUS cashback — no TCGV burn");
   console.log("  Sell (Pancake direct): 5% TCGV routeur OFF (2% vault, 2% autolp, 1% structure) — no fee burn");
-  console.log("  Sell (BuyRouter):     4% USDC routeur ON (1.5% vault, 1% LP, 1% community, 0.5% structure)");
+  console.log("  Sell (BuyRouter):     4% USDC routeur ON (pending on router → claim); 1.5% vault, 1% LP, 1% community, 0.5% structure");
   console.log();
   console.log("Flow: Deploy → TCGV/USDC pair & liquidity → Buy 4 routes (all USDC in) → Sell 2 routes (TCGV→USDC).");
   console.log("All steps completed successfully.");

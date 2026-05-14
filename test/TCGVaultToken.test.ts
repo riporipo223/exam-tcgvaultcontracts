@@ -994,10 +994,17 @@ describe("TCGVaultToken", () => {
       expect(await tcgv.read.isExcludedFromFees([user1.account.address])).to.equal(false);
     });
 
-    it("setBuyFeeParams reverts InvalidFeeParams when buyTaxBp increases", async () => {
+    it("setBuyFeeParams reverts InvalidFeeParams when buyTaxBp exceeds MAX_BUY_TAX_BP", async () => {
       await expectRevert(
         tcgv.write.setBuyFeeParams([601n, 6000n, 4000n, 0n], { account: owner.account })
       );
+    });
+
+    it("setBuyFeeParams allows raising buyTaxBp again after lowering, within MAX_BUY_TAX_BP", async () => {
+      await tcgv.write.setBuyFeeParams([400n, 6000n, 4000n, 0n], { account: owner.account });
+      expect(await tcgv.read.BUY_TAX()).to.equal(400n);
+      await tcgv.write.setBuyFeeParams([600n, 6000n, 4000n, 0n], { account: owner.account });
+      expect(await tcgv.read.BUY_TAX()).to.equal(600n);
     });
 
     it("setBuyFeeParams reverts InvalidFeeParams when shares do not sum to 10000", async () => {
@@ -1012,10 +1019,17 @@ describe("TCGVaultToken", () => {
       expect(await tcgv.read.BUY_VAULT_SHARE()).to.equal(6000n);
     });
 
-    it("setSellFeeParams reverts InvalidFeeParams when sellTaxBp increases", async () => {
+    it("setSellFeeParams reverts InvalidFeeParams when sellTaxBp exceeds MAX_SELL_TAX_BP", async () => {
       await expectRevert(
         tcgv.write.setSellFeeParams([501n, 3750n, 2500n, 1250n, 2500n], { account: owner.account })
       );
+    });
+
+    it("setSellFeeParams allows raising sellTaxBp again after lowering, within MAX_SELL_TAX_BP", async () => {
+      await tcgv.write.setSellFeeParams([300n, 2500n, 2500n, 2500n, 2500n], { account: owner.account });
+      expect(await tcgv.read.SELL_TAX()).to.equal(300n);
+      await tcgv.write.setSellFeeParams([500n, 2500n, 2500n, 2500n, 2500n], { account: owner.account });
+      expect(await tcgv.read.SELL_TAX()).to.equal(500n);
     });
 
     it("setSellFeeParams reverts InvalidFeeParams when shares do not sum to 10000", async () => {
@@ -1392,8 +1406,11 @@ describe("TCGVaultToken", () => {
       const stakeAmt = parseEther("42");
       await stakingVault.write.setRequiredStakeForBasicNFT([stakeAmt], { account: owner.account });
       await mockPresaleLaunch.write.mintPresale([tcgvAddress, user2.account.address, stakeAmt], { account: owner.account });
-      await tcgv.write.approve([stakingVault.address, stakeAmt], { account: user2.account });
-      await stakingVault.write.deposit([stakeAmt, user2.account.address], { account: user2.account });
+      const receiver = user2.account.address;
+      const maxM = await stakingVault.read.maxMint([receiver]);
+      const assets = await stakingVault.read.previewMint([maxM]);
+      await tcgv.write.approve([stakingVault.address, assets], { account: user2.account });
+      await stakingVault.write.deposit([assets, receiver], { account: user2.account });
       const shares = await stakingVault.read.balanceOf([user2.account.address]);
       expect(shares > 0n).to.equal(true);
       await tcgv.write.setBlacklisted([user2.account.address, true, "staked-while-listed"], { account: owner.account });
@@ -1446,8 +1463,11 @@ describe("TCGVaultToken", () => {
 
       // Mint TCGV to user2 via initialLaunch (mock) and stake it.
       await freshMock.write.mintPresale([freshTcgv.address, user2.account.address, stakeAmt], { account: owner.account });
-      await freshTcgvClient.write.approve([stakingVault.address, stakeAmt], { account: user2.account });
-      await stakingVault.write.deposit([stakeAmt, user2.account.address], { account: user2.account });
+      const receiver = user2.account.address;
+      const maxM = await stakingVault.read.maxMint([receiver]);
+      const assets = await stakingVault.read.previewMint([maxM]);
+      await freshTcgvClient.write.approve([stakingVault.address, assets], { account: user2.account });
+      await stakingVault.write.deposit([assets, receiver], { account: user2.account });
 
       const walletBefore = await freshTcgvClient.read.balanceOf([user2.account.address]);
       const vaultBalBefore = await freshTcgvClient.read.balanceOf([vaultAddr]);

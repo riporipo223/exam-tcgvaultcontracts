@@ -81,7 +81,7 @@ async function verifyOne(
     const network = process.env.HARDHAT_NETWORK ?? "bsctest";
     const args = constructorArguments.map((v) => String(v));
     const cmd = [
-      "yarn hardhat verify etherscan",
+      "yarn hardhat verify",
       `--network ${network}`,
       ...(contract ? [`--contract "${contract}"`] : []),
       address,
@@ -575,6 +575,7 @@ async function main() {
       basicNFT: lowerAddr(basicNFTAddress),
       founderNFT: lowerAddr(founderNFTAddress),
       initialLaunch: lowerAddr(initialLaunchAddress),
+      liquidityWrapper: lowerAddr(wrapperAddress),
       tcgr: tcgrAddress ? lowerAddr(tcgrAddress) : null,
       tcgrConverter: converterAddress ? lowerAddr(converterAddress) : null,
     },

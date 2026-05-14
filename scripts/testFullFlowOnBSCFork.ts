@@ -11,7 +11,7 @@
  *
  * Optional — Anvil fork (e.g. Docker):
  *   docker run --rm -it -p 8545:8545 --entrypoint anvil ghcr.io/foundry-rs/foundry:latest \
- *     --fork-url "https://<your-bsc-rpc>" --host 0.0.0.0 --port=8545
+ *     --fork-url "https://<your-bsc-rpc>" --hardfork cancun --host 0.0.0.0 --port=8545
  *   yarn hardhat run scripts/testFullFlowOnBSCFork.ts --network localhost
  *
  * On Phase 4 revert the script prints revert reason and simulation decode (no env needed).

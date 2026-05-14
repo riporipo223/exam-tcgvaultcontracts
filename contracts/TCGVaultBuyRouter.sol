@@ -139,16 +139,13 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
     /**
      * @notice Update buy fee parameters (router mode).
      * @dev `vaultBp + marketingBp + communityBp` is taken from USDC in before swap.
-     *      Monotonic policy: each leg may only stay the same or decrease.
+     *      Each leg is capped only by `MAX_BUY_TOTAL_BP` on the sum (individual legs may be raised again after being lowered).
      */
     function setBuyFeeParams(
         uint256 vaultBp,
         uint256 marketingBp,
         uint256 communityBp
     ) external onlyOwner {
-        if (vaultBp > _buyVaultBp || marketingBp > _buyMarketingBp || communityBp > _buyCommunityBp) {
-            revert InvalidFeeParams();
-        }
         if (vaultBp + marketingBp + communityBp > MAX_BUY_TOTAL_BP) revert InvalidFeeParams();
         _buyVaultBp = vaultBp;
         _buyMarketingBp = marketingBp;
@@ -167,8 +164,7 @@ contract TCGVaultBuyRouter is Ownable2Step, ReentrancyGuardTransient {
         uint256 marketingShareBp,
         uint256 communityShareBp
     ) external onlyOwner {
-        // Monotonic fee policy: sell tax may only stay the same or decrease.
-        if (taxBp > _sellTaxBp || taxBp > MAX_SELL_TAX_BP) revert InvalidFeeParams();
+        if (taxBp > MAX_SELL_TAX_BP) revert InvalidFeeParams();
         if (vaultShareBp + autolpShareBp + marketingShareBp + communityShareBp != 10000) {
             revert InvalidFeeParams();
         }

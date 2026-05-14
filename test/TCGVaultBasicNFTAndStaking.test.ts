@@ -7,7 +7,7 @@ import hre from "hardhat";
 import { parseEther, getAddress } from "viem";
 import type { ContractReturnType } from "@nomicfoundation/hardhat-viem/types";
 
-const { viem } = await hre.network.connect();
+const { viem, networkHelpers } = await hre.network.connect();
 
 async function expectRevert(promise: Promise<unknown>) {
   let reverted = false;
@@ -35,6 +35,7 @@ describe("TCGVaultBasicNFT + StakingVault", () => {
 
   const MIN_STAKE = parseEther("100");
   const USDC_6 = 1_000_000n;
+  const MIN_TWAP_WAIT = 86400n + 1n;
 
   before(async () => {
     [owner, user1, user2, user3, user4, user5] = await viem.getWalletClients();
@@ -88,38 +89,50 @@ describe("TCGVaultBasicNFT + StakingVault", () => {
       );
     });
 
-    it("deposit input amount is ignored; vault stakes to current requirement", async () => {
-      await tcgv.write.approve([stakingVault.address, MIN_STAKE], { account: user4.account });
-      await stakingVault.write.deposit([1n, user4.account.address], { account: user4.account });
-      expect(await stakingVault.read.balanceOf([user4.account.address])).to.equal(MIN_STAKE);
-      await stakingVault.write.redeem([1n, user4.account.address, user4.account.address], { account: user4.account });
+    it("deposit requires assets equal to previewMint(maxMint(receiver)); redeem requires full share balance", async () => {
+      const receiver = user4.account.address;
+      const maxM = await stakingVault.read.maxMint([receiver]);
+      const assetsNeeded = await stakingVault.read.previewMint([maxM]);
+      await tcgv.write.approve([stakingVault.address, assetsNeeded], { account: user4.account });
+      await stakingVault.write.deposit([assetsNeeded, receiver], { account: user4.account });
+      expect(await stakingVault.read.balanceOf([receiver])).to.equal(MIN_STAKE);
+      const shares = await stakingVault.read.balanceOf([receiver]);
+      await stakingVault.write.redeem([shares, receiver, receiver], { account: user4.account });
     });
 
     it("deposit and withdraw", async () => {
-      const depositAmount = MIN_STAKE;
+      const receiver = user1.account.address;
+      const maxM = await stakingVault.read.maxMint([receiver]);
+      const depositAmount = await stakingVault.read.previewMint([maxM]);
       await tcgv.write.approve([stakingVault.address, depositAmount], { account: user1.account });
-      await stakingVault.write.deposit([depositAmount, user1.account.address], { account: user1.account });
-      const shares = (await stakingVault.read.balanceOf([user1.account.address]));
+      await stakingVault.write.deposit([depositAmount, receiver], { account: user1.account });
+      const shares = (await stakingVault.read.balanceOf([receiver]));
       expect(shares > 0n).to.equal(true);
-      await stakingVault.write.redeem([shares, user1.account.address, user1.account.address], { account: user1.account });
-      expect(await stakingVault.read.balanceOf([user1.account.address])).to.equal(0n);
+      await stakingVault.write.redeem([shares, receiver, receiver], { account: user1.account });
+      expect(await stakingVault.read.balanceOf([receiver])).to.equal(0n);
     });
 
-    it("redeem input amount is ignored and full-unstakes", async () => {
-      const depositAmount = MIN_STAKE;
+    it("redeem reverts unless shares equal the owner's full balance", async () => {
+      const receiver = user5.account.address;
+      const maxM = await stakingVault.read.maxMint([receiver]);
+      const depositAmount = await stakingVault.read.previewMint([maxM]);
       await tcgv.write.approve([stakingVault.address, depositAmount], { account: user5.account });
-      await stakingVault.write.deposit([depositAmount, user5.account.address], { account: user5.account });
-      const shares = await stakingVault.read.balanceOf([user5.account.address]);
-      await stakingVault.write.redeem([1n, user5.account.address, user5.account.address], { account: user5.account });
-      expect(await stakingVault.read.balanceOf([user5.account.address])).to.equal(0n);
+      await stakingVault.write.deposit([depositAmount, receiver], { account: user5.account });
+      const shares = await stakingVault.read.balanceOf([receiver]);
+      await expectRevert(
+        stakingVault.write.redeem([1n, receiver, receiver], { account: user5.account })
+      );
+      expect(await stakingVault.read.balanceOf([receiver])).to.equal(shares);
       expect(shares > 0n).to.equal(true);
     });
 
     it("redeem reverts when share owner is blacklisted on underlying asset", async () => {
-      const depositAmount = MIN_STAKE;
+      const receiver = user4.account.address;
+      const maxM = await stakingVault.read.maxMint([receiver]);
+      const depositAmount = await stakingVault.read.previewMint([maxM]);
       await tcgv.write.approve([stakingVault.address, depositAmount], { account: user4.account });
-      await stakingVault.write.deposit([depositAmount, user4.account.address], { account: user4.account });
-      const shares = await stakingVault.read.balanceOf([user4.account.address]);
+      await stakingVault.write.deposit([depositAmount, receiver], { account: user4.account });
+      const shares = await stakingVault.read.balanceOf([receiver]);
       await tcgv.write.setBlacklisted([user4.account.address, true], { account: owner.account });
       await expectRevert(
         stakingVault.write.redeem([shares, user4.account.address, user4.account.address], { account: user4.account })
@@ -152,11 +165,14 @@ describe("TCGVaultBasicNFT + StakingVault", () => {
     });
 
     it("deposit with enough stake auto-mints Basic NFT", async () => {
-      await tcgv.write.transfer([user2.account.address, MIN_STAKE], { account: owner.account });
-      await tcgv.write.approve([stakingVault.address, MIN_STAKE], { account: user2.account });
+      const receiver = user2.account.address;
+      const maxM = await stakingVault.read.maxMint([receiver]);
+      const assets = await stakingVault.read.previewMint([maxM]);
+      await tcgv.write.transfer([user2.account.address, assets], { account: owner.account });
+      await tcgv.write.approve([stakingVault.address, assets], { account: user2.account });
       const totalSupplyBefore = await basicNFT.read.totalSupply();
       const totalMintedBefore = await basicNFT.read.totalMinted();
-      await stakingVault.write.deposit([MIN_STAKE, user2.account.address], { account: user2.account });
+      await stakingVault.write.deposit([assets, receiver], { account: user2.account });
       const tokenId = (await basicNFT.read.nextTokenId()) - 1n;
       expect(getAddress((await basicNFT.read.ownerOf([tokenId])) as `0x${string}`)).to.equal(getAddress(user2.account.address));
       expect(await basicNFT.read.totalSupply()).to.equal(totalSupplyBefore + 1n);
@@ -245,17 +261,51 @@ describe("TCGVaultBasicNFT + StakingVault", () => {
       expect(getAddress((await basicNFT.read.stakingVault()) as `0x${string}`)).to.equal(getAddress(stakingVault.address));
     });
 
-    it("uses dynamic 25 USDC threshold from buy-router pool pricing", async () => {
+    it("uses dynamic 25 USDC threshold from buy-router pool TWAP after observation window", async () => {
       await (stakingVault.write as any).setBasicNFTPricingRouter([pricingRouter.address], { account: owner.account });
+
+      expect(await stakingVault.read.requiredStakeForBasicNFT()).to.equal(MIN_STAKE);
+
+      await networkHelpers.time.increase(MIN_TWAP_WAIT);
+      await networkHelpers.mine();
 
       const dynamicMinStake = await stakingVault.read.requiredStakeForBasicNFT();
       expect(dynamicMinStake).to.equal(parseEther("5")); // pool price = 5 USDC/TCGV => 25 USDC == 5 TCGV
 
-      const depositAmount = dynamicMinStake;
+      const receiver = user3.account.address;
+      const maxM = await stakingVault.read.maxMint([receiver]);
+      const depositAmount = await stakingVault.read.previewMint([maxM]);
       await tcgv.write.transfer([user3.account.address, depositAmount], { account: owner.account });
       await tcgv.write.approve([stakingVault.address, depositAmount], { account: user3.account });
-      await stakingVault.write.deposit([depositAmount, user3.account.address], { account: user3.account });
-      expect(await basicNFT.read.ownerToTokenId([user3.account.address])).to.not.equal(0n);
+      await stakingVault.write.deposit([depositAmount, receiver], { account: user3.account });
+      expect(await basicNFT.read.ownerToTokenId([receiver])).to.not.equal(0n);
+    });
+
+    describe("TWAP sliding window", () => {
+      it("after max window, view still quotes TWAP; deposit persists slid start", async () => {
+        const v = await viem.deployContract("TCGVaultStakingVault", [tcgv.address], { client: { wallet: owner } });
+        await v.write.setRequiredStakeForBasicNFT([MIN_STAKE], { account: owner.account });
+        await v.write.setBasicNFTPricingRouter([pricingRouter.address], { account: owner.account });
+
+        await networkHelpers.time.increase(MIN_TWAP_WAIT);
+        await networkHelpers.mine();
+        expect(await v.read.requiredStakeForBasicNFT()).to.equal(parseEther("5"));
+
+        const anchorBefore = await v.read.basicNFTPricingTwapAnchor();
+        await networkHelpers.time.increase(8n * 86400n);
+        await networkHelpers.mine();
+        expect(await v.read.requiredStakeForBasicNFT()).to.equal(parseEther("5"));
+
+        const receiver = user5.account.address;
+        const maxM = await v.read.maxMint([receiver]);
+        const depositAmount = await v.read.previewMint([maxM]);
+        await tcgv.write.transfer([receiver, depositAmount], { account: owner.account });
+        await tcgv.write.approve([v.address, depositAmount], { account: user5.account });
+        await v.write.deposit([depositAmount, receiver], { account: user5.account });
+
+        const anchorAfter = await v.read.basicNFTPricingTwapAnchor();
+        expect(anchorAfter[0]).to.not.equal(anchorBefore[0]);
+      });
     });
   });
 });

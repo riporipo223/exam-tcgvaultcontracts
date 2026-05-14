@@ -262,7 +262,7 @@ describe("TCGVaultBuyRouter", function () {
     assert.ok((await buyRouter.read.sellMarketingShareBp()) >= 0n);
     assert.ok((await buyRouter.read.sellCommunityShareBp()) >= 0n);
   });
-  it("owner can only lower buy/sell tax rates and set referral token", async function () {
+  it("owner can adjust buy/sell fee params within MAX caps and set referral token", async function () {
     const { buyRouter, owner } = await networkHelpers.loadFixture(deployFixture);
     const tcgr = await viem.deployContract("TCGRToken", [buyRouter.address], { client: { wallet: owner } });
     await buyRouter.write.setReferralToken([tcgr.address], { account: owner.account });
@@ -270,11 +270,16 @@ describe("TCGVaultBuyRouter", function () {
     await buyRouter.write.setBuyFeeParams([200n, 100n, 0n], { account: owner.account });
     assert.strictEqual(await buyRouter.read.buyVaultBp(), 200n);
     assert.strictEqual(await buyRouter.read.buyMarketingBp(), 100n);
+    await buyRouter.write.setBuyFeeParams([301n, 198n, 0n], { account: owner.account });
+    assert.strictEqual(await buyRouter.read.buyVaultBp(), 301n);
+    assert.strictEqual(await buyRouter.read.buyMarketingBp(), 198n);
     await buyRouter.write.setSellFeeParams([300n, 2500n, 2500n, 2500n, 2500n], { account: owner.account });
     assert.strictEqual(await buyRouter.read.sellTaxBp(), 300n);
+    await buyRouter.write.setSellFeeParams([400n, 2500n, 2500n, 2500n, 2500n], { account: owner.account });
+    assert.strictEqual(await buyRouter.read.sellTaxBp(), 400n);
   });
 
-  it("setBuyFeeParams reverts when any buy fee leg increases", async function () {
+  it("setBuyFeeParams reverts when buy fee legs sum above MAX_BUY_TOTAL_BP", async function () {
     const { buyRouter, owner } = await networkHelpers.loadFixture(deployFixture);
     await viem.assertions.revertWithCustomError(
       buyRouter.write.setBuyFeeParams([301n, 200n, 0n], { account: owner.account }),
@@ -283,7 +288,7 @@ describe("TCGVaultBuyRouter", function () {
     );
   });
 
-  it("setSellFeeParams reverts when taxBp increases", async function () {
+  it("setSellFeeParams reverts when taxBp exceeds MAX_SELL_TAX_BP", async function () {
     const { buyRouter, owner } = await networkHelpers.loadFixture(deployFixture);
     await viem.assertions.revertWithCustomError(
       buyRouter.write.setSellFeeParams([401n, 2500n, 2500n, 2500n, 2500n], { account: owner.account }),
